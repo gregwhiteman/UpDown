@@ -19,20 +19,28 @@
   <div id="app" class="app">
     <!-- Top app bar -->
     <header class="topbar" id="topbar">
-      <button type="button" class="icon-btn" id="btn-back" hidden aria-label="Back">‹</button>
+      <div class="topbar-left">
+        <!-- Same slot: Settings on Dashboard, Back on other pages -->
+        <button type="button" class="icon-btn" id="btn-settings" aria-label="Settings">⚙</button>
+        <button type="button" class="icon-btn" id="btn-back" hidden aria-label="Back">‹</button>
+      </div>
       <div class="topbar-title-wrap">
-        <h1 class="topbar-title" id="topbar-title">Portfolio</h1>
+        <h1 class="topbar-title" id="topbar-title">Dashboard</h1>
         <button type="button" class="portfolio-switch" id="btn-portfolio-switch" hidden>
-          <span id="active-portfolio-label">All Portfolios</span>
+          <span id="active-portfolio-label">Portfolio</span>
           <span class="chevron" aria-hidden="true">▾</span>
         </button>
       </div>
-      <button type="button" class="icon-btn" id="btn-refresh" aria-label="Refresh">↻</button>
+      <div class="topbar-right" aria-hidden="true"></div>
     </header>
 
     <!-- Views -->
-    <main class="views">
-      <!-- ALL PORTFOLIOS (CMC-style home) -->
+    <main class="views" id="views">
+      <div class="ptr-indicator" id="ptr-indicator" aria-hidden="true">
+        <span class="ptr-icon" id="ptr-icon">↓</span>
+        <span class="ptr-label" id="ptr-label">Pull to refresh</span>
+      </div>
+      <!-- DASHBOARD: totalled holdings across included portfolios -->
       <section class="view view-active" id="view-home" data-view="home">
         <div class="summary-card">
           <div class="summary-label">Current balance</div>
@@ -41,21 +49,25 @@
             <span class="pill neutral">—</span>
             <span class="muted">24h</span>
           </div>
-          <div class="home-coin-totals" id="home-coin-totals" hidden></div>
+          <div class="chart-wrap" id="home-chart-wrap">
+            <svg class="chart-svg" id="home-chart" viewBox="0 0 320 96" preserveAspectRatio="none" role="img" aria-label="24 hour portfolio value chart"></svg>
+            <p class="chart-empty" id="home-chart-empty" hidden>Chart unavailable</p>
+          </div>
           <p class="scope-hint" id="home-scope-hint" hidden></p>
           <div class="alloc-bar" id="home-alloc-bar" aria-hidden="true"></div>
         </div>
 
         <div class="section-head">
-          <h2>My Portfolios</h2>
-          <button type="button" class="text-btn" id="btn-new-portfolio">+ Create</button>
+          <h2>Holdings</h2>
         </div>
-        <p class="section-sub home-sub">
-          Toggle <strong>In total</strong> to include or exclude a portfolio from the balance above.
-        </p>
-        <div class="portfolio-list" id="portfolio-list"></div>
+        <div class="holdings-header">
+          <span>Name</span>
+          <span class="right">Price / 24h</span>
+          <span class="right">Holdings</span>
+        </div>
+        <div class="holdings-list" id="home-holdings-list"></div>
         <p class="empty-hint" id="home-empty" hidden>
-          Create a portfolio, then add wallet addresses or manual amounts.
+          No holdings yet. Open Settings ⚙ to create a portfolio and add coins.
         </p>
       </section>
 
@@ -178,8 +190,20 @@
         <div class="coin-pick-list" id="coin-pick-list"></div>
       </section>
 
-      <!-- SETTINGS -->
+      <!-- SETTINGS: portfolios + data -->
       <section class="view" id="view-settings" data-view="settings">
+        <div class="section-head">
+          <h2>Portfolios</h2>
+          <button type="button" class="text-btn" id="btn-new-portfolio">+ Create</button>
+        </div>
+        <p class="section-sub home-sub">
+          Manage portfolios here. Toggle <strong>In total</strong> to include or exclude a portfolio from the Dashboard balance.
+        </p>
+        <div class="portfolio-list" id="portfolio-list"></div>
+        <p class="empty-hint" id="settings-pf-empty" hidden>
+          Create a portfolio, then add wallet addresses or manual amounts.
+        </p>
+
         <div class="settings-group">
           <h2>Data</h2>
           <p class="page-desc">Everything is saved in this browser’s local storage. Clearing data cannot be undone.</p>
@@ -197,18 +221,6 @@
         </div>
       </section>
     </main>
-
-    <!-- Bottom tab bar -->
-    <nav class="tabbar" aria-label="Main">
-      <button type="button" class="tab active" data-tab="home">
-        <span class="tab-icon">◫</span>
-        <span>Portfolio</span>
-      </button>
-      <button type="button" class="tab" data-tab="settings">
-        <span class="tab-icon">⚙</span>
-        <span>Settings</span>
-      </button>
-    </nav>
   </div>
 
   <!-- Modal: create / rename portfolio -->
@@ -229,7 +241,7 @@
     <div class="modal sheet" role="dialog" aria-modal="true">
       <h2>Switch portfolio</h2>
       <div class="picker-list" id="picker-list"></div>
-      <button type="button" class="btn-secondary full" id="picker-all">All Portfolios</button>
+      <button type="button" class="btn-secondary full" id="picker-all">Manage portfolios</button>
       <button type="button" class="btn-secondary full" id="picker-close">Close</button>
     </div>
   </div>

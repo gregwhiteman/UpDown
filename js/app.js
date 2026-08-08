@@ -120,6 +120,12 @@ let store = loadStore();
 let prices = {};
 
 /**
+ * Cached CoinGecko 24h market charts: coinId → { fetchedAt, points: [ts, price][] }
+ * @type {Record<string, { fetchedAt: number, points: [number, number][] }>}
+ */
+let chartCache = {};
+
+/**
  * balanceCache[portfolioId][coinId][address] = { balance, error, loading }
  * @type {Record<string, Record<string, Record<string, { balance: number|null, error: string|null, loading: boolean }>>>}
  */
@@ -503,6 +509,209 @@ async function fetchPrices() {
   prices = next;
 }
 
+const CHART_CACHE_MS = 5 * 60 * 1000;
+
+/** Fetch (or reuse) 24h price series for a coin from CoinGecko. */
+async function fetchCoinChart24h(coinId) {
+  const coin = COIN_BY_ID[coinId];
+  if (!coin) return [];
+  const cached = chartCache[coinId];
+  if (cached && Date.now() - cached.fetchedAt < CHART_CACHE_MS && cached.points?.length) {
+    return cached.points;
+  }
+  const data = await fetchJson(
+    `https://api.coingecko.com/api/v3/coins/${encodeURIComponent(coin.geckoId)}/market_chart?vs_currency=usd&days=1`
+  );
+  const points = Array.isArray(data?.prices)
+    ? data.prices
+        .filter((p) => Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]))
+        .map((p) => /** @type {[number, number]} */ ([p[0], p[1]]))
+    : [];
+  chartCache[coinId] = { fetchedAt: Date.now(), points };
+  return points;
+}
+
+/**
+ * Build a portfolio USD value series over 24h using current balances × historical prices.
+ * @param {{ coinId: string, balance: number }[]} holdings
+ * @returns {Promise<{ t: number, v: number }[]>}
+ */
+async function buildPortfolioSeries(holdings) {
+  const active = (holdings || []).filter((h) => h.balance > 0 && COIN_BY_ID[h.coinId]);
+  if (!active.length) return [];
+
+  const seriesByCoin = {};
+  await runPool(
+    active.map((h) => async () => {
+      try {
+        seriesByCoin[h.coinId] = await fetchCoinChart24h(h.coinId);
+      } catch {
+        seriesByCoin[h.coinId] = chartCache[h.coinId]?.points || [];
+      }
+    }),
+    3
+  );
+
+  // Common timeline from the densest series
+  let timeline = [];
+  for (const h of active) {
+    const pts = seriesByCoin[h.coinId] || [];
+    if (pts.length > timeline.length) timeline = pts.map((p) => p[0]);
+  }
+  if (timeline.length < 2) {
+    // Fallback: flat line from current total
+    const total = active.reduce((s, h) => s + h.balance * (prices[h.coinId]?.usd || 0), 0);
+    const now = Date.now();
+    return [
+      { t: now - 24 * 3600 * 1000, v: total },
+      { t: now, v: total },
+    ];
+  }
+
+  function priceAt(points, ts) {
+    if (!points?.length) return null;
+    // Binary search nearest
+    let lo = 0;
+    let hi = points.length - 1;
+    if (ts <= points[0][0]) return points[0][1];
+    if (ts >= points[hi][0]) return points[hi][1];
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const mt = points[mid][0];
+      if (mt === ts) return points[mid][1];
+      if (mt < ts) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    const i = Math.max(0, Math.min(points.length - 1, lo));
+    const a = points[Math.max(0, i - 1)];
+    const b = points[i];
+    if (!a || !b) return b?.[1] ?? a?.[1] ?? null;
+    if (b[0] === a[0]) return b[1];
+    const w = (ts - a[0]) / (b[0] - a[0]);
+    return a[1] + (b[1] - a[1]) * w;
+  }
+
+  const out = [];
+  for (const t of timeline) {
+    let v = 0;
+    let ok = false;
+    for (const h of active) {
+      const px = priceAt(seriesByCoin[h.coinId], t);
+      if (px == null) continue;
+      v += h.balance * px;
+      ok = true;
+    }
+    if (ok) out.push({ t, v });
+  }
+  return out;
+}
+
+/**
+ * Draw a 24h area chart into an SVG element.
+ * @param {SVGElement} svg
+ * @param {{ t: number, v: number }[]} series
+ * @param {HTMLElement|null} emptyEl
+ */
+function renderSparkline(svg, series, emptyEl) {
+  if (!svg) return;
+  const empty = emptyEl;
+  if (!series || series.length < 2) {
+    svg.innerHTML = "";
+    if (empty) empty.hidden = false;
+    return;
+  }
+  if (empty) empty.hidden = true;
+
+  const W = 320;
+  const H = 96;
+  const padX = 0;
+  const padY = 6;
+  const vals = series.map((p) => p.v);
+  let min = Math.min(...vals);
+  let max = Math.max(...vals);
+  if (min === max) {
+    min *= 0.99;
+    max *= 1.01;
+    if (min === 0 && max === 0) {
+      min = -1;
+      max = 1;
+    }
+  }
+  const first = series[0].v;
+  const last = series[series.length - 1].v;
+  const up = last >= first;
+  const stroke = up ? "#16c784" : "#ea3943";
+  const fillId = `chartFill_${svg.id || "main"}`;
+
+  const xAt = (i) => padX + (i / (series.length - 1)) * (W - padX * 2);
+  const yAt = (v) => padY + (1 - (v - min) / (max - min)) * (H - padY * 2);
+
+  let line = "";
+  let area = "";
+  for (let i = 0; i < series.length; i++) {
+    const x = xAt(i);
+    const y = yAt(series[i].v);
+    line += i === 0 ? `M ${x.toFixed(2)} ${y.toFixed(2)}` : ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
+  }
+  const yBase = H;
+  area =
+    line +
+    ` L ${xAt(series.length - 1).toFixed(2)} ${yBase} L ${xAt(0).toFixed(2)} ${yBase} Z`;
+
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = `
+    <defs>
+      <linearGradient id="${fillId}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="${stroke}" stop-opacity="0.35"/>
+        <stop offset="100%" stop-color="${stroke}" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    <path d="${area}" fill="url(#${fillId})" />
+    <path d="${line}" fill="none" stroke="${stroke}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+  `;
+}
+
+let chartRenderToken = 0;
+
+/** Load and paint the dashboard 24h portfolio chart from included holdings. */
+async function updateHomeChart(allocRows) {
+  const svg = document.getElementById("home-chart");
+  const empty = document.getElementById("home-chart-empty");
+  if (!svg) return;
+
+  const holdings = (allocRows || [])
+    .filter((r) => r.balance > 0)
+    .map((r) => ({ coinId: r.coinId, balance: r.balance }));
+
+  if (!holdings.length) {
+    svg.innerHTML = "";
+    if (empty) {
+      empty.hidden = false;
+      empty.textContent = "Add holdings to see the 24h chart";
+    }
+    return;
+  }
+
+  const token = ++chartRenderToken;
+  if (empty) {
+    empty.hidden = false;
+    empty.textContent = "Loading chart…";
+  }
+
+  try {
+    const series = await buildPortfolioSeries(holdings);
+    if (token !== chartRenderToken) return;
+    renderSparkline(svg, series, empty);
+  } catch {
+    if (token !== chartRenderToken) return;
+    svg.innerHTML = "";
+    if (empty) {
+      empty.hidden = false;
+      empty.textContent = "Chart unavailable";
+    }
+  }
+}
+
 function humanizeError(err) {
   const msg = err?.message || String(err);
   if (/Failed to fetch|NetworkError|TypeError/i.test(msg)) return "Network error";
@@ -692,37 +901,191 @@ async function runPool(fns, concurrency = 4) {
   );
 }
 
-async function refreshAll() {
-  const btn = document.getElementById("btn-refresh");
-  btn.classList.add("spin");
-  btn.disabled = true;
+let refreshInFlight = false;
+
+async function refreshAll({ fromPull } = {}) {
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+
+  const ptr = document.getElementById("ptr-indicator");
+  const ptrIcon = document.getElementById("ptr-icon");
+  const ptrLabel = document.getElementById("ptr-label");
+  if (fromPull && ptr) {
+    ptr.classList.add("visible", "refreshing");
+    ptr.classList.remove("armed");
+    if (ptrIcon) ptrIcon.textContent = "↻";
+    if (ptrLabel) ptrLabel.textContent = "Refreshing…";
+  }
 
   try {
-    await fetchPrices();
-  } catch (err) {
-    toast(`Prices: ${humanizeError(err)}`, "error");
-  }
+    try {
+      await fetchPrices();
+    } catch (err) {
+      toast(`Prices: ${humanizeError(err)}`, "error");
+    }
 
-  const jobs = [];
-  for (const pf of store.portfolios) {
-    for (const coin of COINS) {
-      const holding = getCoinHolding(pf, coin.id);
-      for (const addr of holding.addresses) {
-        ensureCacheSlot(pf.id, coin.id, addr).loading = true;
-        jobs.push(() => refreshBalance(pf.id, coin.id, addr));
+    // Allow pull-to-refresh to pull fresh 24h series
+    chartCache = {};
+
+    const jobs = [];
+    for (const pf of store.portfolios) {
+      for (const coin of COINS) {
+        const holding = getCoinHolding(pf, coin.id);
+        for (const addr of holding.addresses) {
+          ensureCacheSlot(pf.id, coin.id, addr).loading = true;
+          jobs.push(() => refreshBalance(pf.id, coin.id, addr));
+        }
       }
     }
+
+    if (jobs.length) {
+      render(); // show loading states
+      await runPool(jobs, 4);
+    }
+
+    render();
+    toast("Updated", "success");
+  } finally {
+    refreshInFlight = false;
+    if (ptr) {
+      ptr.classList.remove("visible", "refreshing", "armed");
+      if (ptrIcon) ptrIcon.textContent = "↓";
+      if (ptrLabel) ptrLabel.textContent = "Pull to refresh";
+      ptr.style.transform = "";
+    }
+  }
+}
+
+// ── Pull to refresh ────────────────────────────────────────────────────────
+
+const PTR = {
+  threshold: 72,
+  maxPull: 120,
+  startY: 0,
+  pulling: false,
+  armed: false,
+  distance: 0,
+};
+
+function setPtrPull(distance) {
+  const views = document.getElementById("views");
+  const ptr = document.getElementById("ptr-indicator");
+  const ptrIcon = document.getElementById("ptr-icon");
+  const ptrLabel = document.getElementById("ptr-label");
+  if (!views || !ptr) return;
+
+  PTR.distance = distance;
+  const show = distance > 4;
+  ptr.classList.toggle("visible", show);
+  PTR.armed = distance >= PTR.threshold;
+  ptr.classList.toggle("armed", PTR.armed && !refreshInFlight);
+
+  if (ptrIcon && !refreshInFlight) ptrIcon.textContent = "↓";
+  if (ptrLabel && !refreshInFlight) {
+    ptrLabel.textContent = PTR.armed ? "Release to refresh" : "Pull to refresh";
   }
 
-  if (jobs.length) {
-    render(); // show loading states
-    await runPool(jobs, 4);
-  }
+  // Ease the pull distance for a rubber-band feel
+  const eased = Math.min(distance, PTR.maxPull) * 0.55;
+  ptr.style.transform = `translateY(calc(-100% + ${eased}px))`;
+  views.style.transform = distance > 0 ? `translateY(${eased}px)` : "";
+}
 
-  btn.classList.remove("spin");
-  btn.disabled = false;
-  render();
-  toast("Updated", "success");
+function resetPtrVisual({ animate } = {}) {
+  const views = document.getElementById("views");
+  const ptr = document.getElementById("ptr-indicator");
+  if (views) {
+    if (animate) views.classList.add("ptr-snapping");
+    views.style.transform = "";
+    if (animate) {
+      const done = () => views.classList.remove("ptr-snapping");
+      views.addEventListener("transitionend", done, { once: true });
+      setTimeout(done, 250);
+    }
+  }
+  if (ptr && !refreshInFlight) {
+    ptr.classList.remove("visible", "armed", "refreshing");
+    ptr.style.transform = "";
+    const ptrIcon = document.getElementById("ptr-icon");
+    const ptrLabel = document.getElementById("ptr-label");
+    if (ptrIcon) ptrIcon.textContent = "↓";
+    if (ptrLabel) ptrLabel.textContent = "Pull to refresh";
+  }
+  PTR.distance = 0;
+  PTR.pulling = false;
+  PTR.armed = false;
+}
+
+function wirePullToRefresh() {
+  const views = document.getElementById("views");
+  if (!views) return;
+
+  views.addEventListener(
+    "touchstart",
+    (e) => {
+      if (refreshInFlight) return;
+      if (views.scrollTop > 0) {
+        PTR.pulling = false;
+        return;
+      }
+      PTR.startY = e.touches[0].clientY;
+      PTR.pulling = true;
+      PTR.armed = false;
+      PTR.distance = 0;
+    },
+    { passive: true }
+  );
+
+  views.addEventListener(
+    "touchmove",
+    (e) => {
+      if (!PTR.pulling || refreshInFlight) return;
+      if (views.scrollTop > 0) {
+        resetPtrVisual();
+        return;
+      }
+      const dy = e.touches[0].clientY - PTR.startY;
+      if (dy <= 0) {
+        setPtrPull(0);
+        return;
+      }
+      // Prevent native overscroll while pulling
+      if (e.cancelable) e.preventDefault();
+      setPtrPull(dy);
+    },
+    { passive: false }
+  );
+
+  const endPull = () => {
+    if (!PTR.pulling) return;
+    const shouldRefresh = PTR.armed && !refreshInFlight;
+    const ptr = document.getElementById("ptr-indicator");
+    if (shouldRefresh) {
+      // Park indicator in view while refreshing
+      if (ptr) {
+        ptr.classList.add("visible", "refreshing");
+        ptr.classList.remove("armed");
+        ptr.style.transform = "translateY(8px)";
+        const ptrIcon = document.getElementById("ptr-icon");
+        const ptrLabel = document.getElementById("ptr-label");
+        if (ptrIcon) ptrIcon.textContent = "↻";
+        if (ptrLabel) ptrLabel.textContent = "Refreshing…";
+      }
+      if (views) {
+        views.classList.add("ptr-snapping");
+        views.style.transform = "translateY(48px)";
+      }
+      PTR.pulling = false;
+      refreshAll({ fromPull: true }).finally(() => {
+        resetPtrVisual({ animate: true });
+      });
+    } else {
+      resetPtrVisual({ animate: true });
+    }
+  };
+
+  views.addEventListener("touchend", endPull, { passive: true });
+  views.addEventListener("touchcancel", endPull, { passive: true });
 }
 
 // ── UI helpers ─────────────────────────────────────────────────────────────
@@ -753,38 +1116,6 @@ function renderAllocBar(el, rows) {
   }
 }
 
-/** Total coin amounts across portfolios included in the main balance. */
-function renderHomeCoinTotals(allocRows) {
-  const el = document.getElementById("home-coin-totals");
-  if (!el) return;
-
-  const rows = (allocRows || []).filter((r) => r.balance > 0);
-  if (!rows.length) {
-    el.hidden = true;
-    el.innerHTML = "";
-    return;
-  }
-
-  el.hidden = false;
-  el.innerHTML = rows
-    .map((r) => {
-      const coin = COIN_BY_ID[r.coinId];
-      if (!coin) return "";
-      const color = coin.color || "#3861fb";
-      return `
-        <div class="home-coin-row">
-          <div class="home-coin-left">
-            <span class="home-coin-dot" style="background:${color}" aria-hidden="true"></span>
-            <span class="home-coin-amt mono">${escapeHtml(formatAmt(r.balance, coin.symbol))}</span>
-          </div>
-          <span class="home-coin-usd muted">${formatUsd(r.usd)}</span>
-        </div>
-      `;
-    })
-    .filter(Boolean)
-    .join("");
-}
-
 function setChangePill(container, changeUsd, changePct) {
   const { text, cls } = formatChangeUsd(changeUsd, changePct);
   container.innerHTML = `<span class="pill ${cls}">${text}</span><span class="muted">24h</span>`;
@@ -806,61 +1137,51 @@ function render() {
   });
 
   const back = document.getElementById("btn-back");
+  const settingsBtn = document.getElementById("btn-settings");
   const title = document.getElementById("topbar-title");
   const switchBtn = document.getElementById("btn-portfolio-switch");
-  const tabbar = document.querySelector(".tabbar");
 
-  // Tabs
-  document.querySelectorAll(".tab").forEach((t) => {
-    const isHome = nav.view === "home" || nav.view === "portfolio" || nav.view === "asset" || nav.view === "add-coin";
-    if (t.dataset.tab === "home") t.classList.toggle("active", isHome && nav.view !== "settings");
-    if (t.dataset.tab === "settings") t.classList.toggle("active", nav.view === "settings");
-  });
+  // Same top-left slot: Settings on Dashboard only; Back everywhere else
+  const isDashboard = nav.view === "home";
+  if (settingsBtn) settingsBtn.hidden = !isDashboard;
+  if (back) back.hidden = isDashboard;
 
   if (nav.view === "home") {
-    back.hidden = true;
     title.hidden = false;
-    title.textContent = "Portfolio";
+    title.textContent = "Dashboard";
     switchBtn.hidden = true;
-    tabbar.style.display = "";
     renderHome();
   } else if (nav.view === "portfolio") {
-    back.hidden = false;
     title.hidden = true;
     switchBtn.hidden = false;
     const pf = getPortfolio(nav.portfolioId);
     document.getElementById("active-portfolio-label").textContent = pf?.name || "Portfolio";
-    tabbar.style.display = "";
     renderPortfolio();
   } else if (nav.view === "asset") {
-    back.hidden = false;
     title.hidden = false;
     title.textContent = COIN_BY_ID[nav.coinId]?.symbol || "Asset";
     switchBtn.hidden = true;
-    tabbar.style.display = "";
     renderAsset();
   } else if (nav.view === "add-coin") {
-    back.hidden = false;
     title.hidden = false;
     title.textContent = "Add holding";
     switchBtn.hidden = true;
-    tabbar.style.display = "";
     renderAddCoin();
   } else if (nav.view === "settings") {
-    back.hidden = true;
     title.hidden = false;
     title.textContent = "Settings";
     switchBtn.hidden = true;
-    tabbar.style.display = "";
+    renderSettings();
   }
 }
 
+/** Dashboard: aggregated coin holdings from portfolios included in the total. */
 function renderHome() {
-  const { totalUsd, changeUsd, changePct, perPf, allocRows, excludedCount } = allPortfoliosTotals();
+  const { totalUsd, changeUsd, changePct, allocRows, excludedCount } = allPortfoliosTotals();
   document.getElementById("home-total").textContent = formatUsd(totalUsd);
   setChangePill(document.getElementById("home-change"), changeUsd, changePct);
   renderAllocBar(document.getElementById("home-alloc-bar"), allocRows);
-  renderHomeCoinTotals(allocRows);
+  updateHomeChart(allocRows);
 
   const scopeEl = document.getElementById("home-scope-hint");
   if (scopeEl) {
@@ -876,8 +1197,64 @@ function renderHome() {
     }
   }
 
-  const list = document.getElementById("portfolio-list");
+  const list = document.getElementById("home-holdings-list");
   const empty = document.getElementById("home-empty");
+  list.innerHTML = "";
+
+  const rows = (allocRows || []).filter((r) => r.balance > 0 || r.usd > 0);
+  if (!rows.length) {
+    empty.hidden = false;
+    return;
+  }
+  empty.hidden = true;
+
+  for (const r of rows) {
+    const coin = COIN_BY_ID[r.coinId];
+    if (!coin) continue;
+    const px = prices[coin.id]?.usd;
+    const ch = prices[coin.id]?.change24h;
+    const pct = formatPct(ch);
+
+    // Loading if any included portfolio still fetching this coin
+    let anyLoading = false;
+    for (const pf of store.portfolios) {
+      if (!isIncludedInTotal(pf)) continue;
+      const holding = getCoinHolding(pf, coin.id);
+      if (holding.addresses.some((a) => balanceCache[pf.id]?.[coin.id]?.[a]?.loading)) {
+        anyLoading = true;
+        break;
+      }
+    }
+
+    const row = document.createElement("div");
+    row.className = "holding-row";
+    row.setAttribute("role", "row");
+    row.innerHTML = `
+      <div class="holding-left">
+        <div class="coin-avatar" style="background:${coin.color};color:${iconContrast(coin.color)}">${coin.symbol.slice(0, 4)}</div>
+        <div>
+          <div class="holding-name">${escapeHtml(coin.name)}</div>
+          <div class="holding-symbol">${coin.symbol}</div>
+        </div>
+      </div>
+      <div class="holding-mid">
+        <div class="holding-price">${px != null ? formatUsd(px) : "—"}</div>
+        <div class="holding-pct ${pct.cls}">${pct.text}</div>
+      </div>
+      <div class="holding-right">
+        <div class="holding-value">${anyLoading && r.balance === 0 ? "…" : formatUsd(r.usd)}</div>
+        <div class="holding-amount">${r.balance > 0 ? formatAmt(r.balance, coin.symbol) : "—"}</div>
+      </div>
+    `;
+    list.appendChild(row);
+  }
+}
+
+/** Settings: portfolio list + include toggles (management lives here, not on Dashboard). */
+function renderSettings() {
+  const { perPf } = allPortfoliosTotals();
+  const list = document.getElementById("portfolio-list");
+  const empty = document.getElementById("settings-pf-empty");
   list.innerHTML = "";
 
   if (!store.portfolios.length) {
@@ -907,8 +1284,8 @@ function renderHome() {
       </button>
       <div class="pf-card-toggle-row">
         <span class="pf-toggle-label">${included ? "In total" : "Excluded"}</span>
-        <label class="switch" title="Include in main portfolio total">
-          <input type="checkbox" class="pf-include-toggle" ${included ? "checked" : ""} aria-label="Include ${escapeHtml(pf.name)} in main total" />
+        <label class="switch" title="Include in Dashboard total">
+          <input type="checkbox" class="pf-include-toggle" ${included ? "checked" : ""} aria-label="Include ${escapeHtml(pf.name)} in Dashboard total" />
           <span class="switch-track" aria-hidden="true"></span>
         </label>
       </div>
@@ -924,13 +1301,11 @@ function renderHome() {
       e.stopPropagation();
       pf.includeInTotal = e.target.checked;
       saveStore();
-      renderHome();
+      renderSettings();
       toast(e.target.checked ? `“${pf.name}” included in total` : `“${pf.name}” excluded from total`);
     });
 
-    // Prevent toggle click from bubbling awkwardly
     card.querySelector(".switch").addEventListener("click", (e) => e.stopPropagation());
-
     list.appendChild(card);
   }
 }
@@ -1230,7 +1605,7 @@ function deleteCurrentPortfolio() {
   }
   delete balanceCache[pf.id];
   saveStore();
-  showView("home");
+  showView("settings");
   toast("Portfolio deleted");
 }
 
@@ -1382,15 +1757,20 @@ function wipeAll() {
 // ── Event wiring ───────────────────────────────────────────────────────────
 
 function wire() {
-  document.getElementById("btn-refresh").addEventListener("click", () => refreshAll());
+  wirePullToRefresh();
 
   document.getElementById("btn-back").addEventListener("click", () => {
     if (nav.view === "asset" || nav.view === "add-coin") {
       showView("portfolio", { portfolioId: nav.portfolioId });
     } else if (nav.view === "portfolio") {
+      // Portfolios are managed from Settings
+      showView("settings");
+    } else if (nav.view === "settings") {
       showView("home");
     }
   });
+
+  document.getElementById("btn-settings").addEventListener("click", () => showView("settings"));
 
   document.getElementById("btn-new-portfolio").addEventListener("click", () => openPortfolioModal("create"));
   document.getElementById("btn-rename-portfolio").addEventListener("click", () => openPortfolioModal("rename"));
@@ -1409,7 +1789,7 @@ function wire() {
   });
   document.getElementById("picker-all").addEventListener("click", () => {
     document.getElementById("modal-picker").hidden = true;
-    showView("home");
+    showView("settings");
   });
 
   document.getElementById("add-address-form").addEventListener("submit", async (e) => {
@@ -1424,13 +1804,6 @@ function wire() {
       document.getElementById("manual-amount-input").value,
       document.getElementById("manual-label-input").value
     );
-  });
-
-  document.querySelectorAll(".tab").forEach((tab) => {
-    tab.addEventListener("click", () => {
-      if (tab.dataset.tab === "home") showView("home");
-      if (tab.dataset.tab === "settings") showView("settings");
-    });
   });
 
   document.getElementById("btn-export").addEventListener("click", exportData);
@@ -1456,4 +1829,4 @@ function wire() {
 
 wire();
 render();
-refreshAll();
+refreshAll({ fromPull: false });
