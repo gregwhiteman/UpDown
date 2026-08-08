@@ -1,0 +1,18 @@
+{
+  "name": "UpDown",
+  "short_name": "UpDown",
+  "description": "Multi-portfolio crypto tracker",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#0d1421",
+  "theme_color": "#0d1421",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect fill='%230d1421' width='100' height='100' rx='20'/><text y='.72em' x='50%' text-anchor='middle' font-size='70'>↕</text></svg>",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

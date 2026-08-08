@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0d1421" />
+  <meta name="description" content="UpDown — multi-portfolio crypto tracker for BTC, XRP, XLM, HBAR, ADA, Midnight, DOGE, and LTC." />
+  <title>UpDown</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>↕</text></svg>" />
+  <link rel="manifest" href="manifest.json" />
+</head>
+<body>
+  <div id="app" class="app">
+    <!-- Top app bar -->
+    <header class="topbar" id="topbar">
+      <button type="button" class="icon-btn" id="btn-back" hidden aria-label="Back">‹</button>
+      <div class="topbar-title-wrap">
+        <h1 class="topbar-title" id="topbar-title">Portfolio</h1>
+        <button type="button" class="portfolio-switch" id="btn-portfolio-switch" hidden>
+          <span id="active-portfolio-label">All Portfolios</span>
+          <span class="chevron" aria-hidden="true">▾</span>
+        </button>
+      </div>
+      <button type="button" class="icon-btn" id="btn-refresh" aria-label="Refresh">↻</button>
+    </header>
+
+    <!-- Views -->
+    <main class="views">
+      <!-- ALL PORTFOLIOS (CMC-style home) -->
+      <section class="view view-active" id="view-home" data-view="home">
+        <div class="summary-card">
+          <div class="summary-label">Current balance</div>
+          <div class="summary-value" id="home-total">$0.00</div>
+          <div class="summary-change" id="home-change">
+            <span class="pill neutral">—</span>
+            <span class="muted">24h</span>
+          </div>
+          <p class="scope-hint" id="home-scope-hint" hidden></p>
+          <div class="alloc-bar" id="home-alloc-bar" aria-hidden="true"></div>
+        </div>
+
+        <div class="section-head">
+          <h2>My Portfolios</h2>
+          <button type="button" class="text-btn" id="btn-new-portfolio">+ Create</button>
+        </div>
+        <p class="section-sub home-sub">
+          Toggle <strong>In total</strong> to include or exclude a portfolio from the balance above.
+        </p>
+        <div class="portfolio-list" id="portfolio-list"></div>
+        <p class="empty-hint" id="home-empty" hidden>
+          Create a portfolio, then add wallet addresses or manual amounts.
+        </p>
+      </section>
+
+      <!-- SINGLE PORTFOLIO DETAIL (CMC holdings page) -->
+      <section class="view" id="view-portfolio" data-view="portfolio">
+        <div class="summary-card">
+          <div class="summary-label" id="pf-name-label">Portfolio</div>
+          <div class="summary-value" id="pf-total">$0.00</div>
+          <div class="summary-change" id="pf-change">
+            <span class="pill neutral">—</span>
+            <span class="muted">24h</span>
+          </div>
+          <div class="alloc-bar" id="pf-alloc-bar"></div>
+          <div class="summary-stats">
+            <div>
+              <div class="stat-label">Assets</div>
+              <div class="stat-value" id="pf-asset-count">0</div>
+            </div>
+            <div>
+              <div class="stat-label">Sources</div>
+              <div class="stat-value" id="pf-addr-count">0</div>
+            </div>
+            <div>
+              <div class="stat-label">Updated</div>
+              <div class="stat-value" id="pf-updated">—</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-head">
+          <h2>Holdings</h2>
+          <button type="button" class="text-btn" id="btn-add-holding">+ Add</button>
+        </div>
+
+        <div class="holdings-header">
+          <span>Name</span>
+          <span class="right">Price / 24h</span>
+          <span class="right">Holdings</span>
+        </div>
+        <div class="holdings-list" id="holdings-list"></div>
+        <p class="empty-hint" id="pf-empty" hidden>
+          Nothing here yet. Tap + Add to enter an amount manually or attach a wallet address.
+        </p>
+
+        <div class="pf-actions">
+          <button type="button" class="btn-secondary" id="btn-rename-portfolio">Rename</button>
+          <button type="button" class="btn-danger-ghost" id="btn-delete-portfolio">Delete portfolio</button>
+        </div>
+      </section>
+
+      <!-- ASSET: manual amounts + wallet addresses -->
+      <section class="view" id="view-asset" data-view="asset">
+        <div class="asset-hero">
+          <div class="coin-avatar lg" id="asset-avatar">BTC</div>
+          <div>
+            <h2 id="asset-name">Bitcoin</h2>
+            <div class="muted mono" id="asset-price-line">—</div>
+          </div>
+        </div>
+        <div class="summary-card compact">
+          <div class="summary-label">Total holdings value</div>
+          <div class="summary-value sm" id="asset-total">$0.00</div>
+          <div class="muted mono" id="asset-amount">0 BTC</div>
+          <div class="breakdown" id="asset-breakdown"></div>
+        </div>
+
+        <!-- Manual amounts -->
+        <div class="section-head">
+          <h2>Manual amounts</h2>
+        </div>
+        <p class="section-sub">Exchange balances, cold amounts, or anything you enter yourself.</p>
+        <div class="address-list" id="asset-manual-list"></div>
+
+        <form class="add-form card-form" id="add-manual-form" autocomplete="off">
+          <label class="field-label" for="manual-amount-input">Amount</label>
+          <input
+            id="manual-amount-input"
+            class="field-input"
+            type="text"
+            inputmode="decimal"
+            placeholder="e.g. 0.5"
+          />
+          <label class="field-label" for="manual-label-input">Label (optional)</label>
+          <input
+            id="manual-label-input"
+            class="field-input"
+            type="text"
+            maxlength="40"
+            placeholder="e.g. Binance, Coinbase"
+          />
+          <button type="submit" class="btn-primary full">Add manual amount</button>
+        </form>
+
+        <!-- Wallet addresses -->
+        <div class="section-head spaced">
+          <h2>Wallet addresses</h2>
+        </div>
+        <p class="section-sub">Live on-chain balances. Combined with manual amounts above.</p>
+        <div class="address-list" id="asset-address-list"></div>
+
+        <form class="add-form card-form" id="add-address-form" autocomplete="off">
+          <label class="field-label" for="address-input">Address</label>
+          <input
+            id="address-input"
+            class="field-input"
+            type="text"
+            spellcheck="false"
+            autocapitalize="off"
+            autocomplete="off"
+            placeholder="Paste wallet address"
+          />
+          <p class="field-hint" id="address-hint"></p>
+          <button type="submit" class="btn-secondary full">Add address</button>
+        </form>
+      </section>
+
+      <!-- ADD HOLDING: pick a coin -->
+      <section class="view" id="view-add-coin" data-view="add-coin">
+        <p class="page-desc">Choose a coin, then enter a manual amount and/or attach a wallet address. Both count toward your total.</p>
+        <div class="coin-pick-list" id="coin-pick-list"></div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section class="view" id="view-settings" data-view="settings">
+        <div class="settings-group">
+          <h2>Data</h2>
+          <p class="page-desc">Everything is saved in this browser’s local storage. Clearing data cannot be undone.</p>
+          <button type="button" class="btn-secondary full" id="btn-export">Export portfolios (JSON)</button>
+          <button type="button" class="btn-secondary full" id="btn-import">Import portfolios</button>
+          <input type="file" id="import-file" accept="application/json,.json" hidden />
+          <button type="button" class="btn-danger full" id="btn-wipe">Clear all local data</button>
+        </div>
+        <div class="settings-group">
+          <h2>About</h2>
+          <p class="page-desc">
+            UpDown tracks BTC, XRP, XLM, HBAR, ADA, Midnight (NIGHT), DOGE, and LTC via public blockchain APIs and CoinGecko prices.
+            Not financial advice.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <!-- Bottom tab bar -->
+    <nav class="tabbar" aria-label="Main">
+      <button type="button" class="tab active" data-tab="home">
+        <span class="tab-icon">◫</span>
+        <span>Portfolio</span>
+      </button>
+      <button type="button" class="tab" data-tab="settings">
+        <span class="tab-icon">⚙</span>
+        <span>Settings</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- Modal: create / rename portfolio -->
+  <div class="modal-backdrop" id="modal-portfolio" hidden>
+    <div class="modal sheet" role="dialog" aria-modal="true" aria-labelledby="modal-portfolio-title">
+      <h2 id="modal-portfolio-title">Create portfolio</h2>
+      <label class="field-label" for="portfolio-name-input">Name</label>
+      <input id="portfolio-name-input" class="field-input" type="text" maxlength="40" placeholder="e.g. Main, Cold storage" />
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" id="modal-portfolio-cancel">Cancel</button>
+        <button type="button" class="btn-primary" id="modal-portfolio-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Portfolio picker sheet -->
+  <div class="modal-backdrop" id="modal-picker" hidden>
+    <div class="modal sheet" role="dialog" aria-modal="true">
+      <h2>Switch portfolio</h2>
+      <div class="picker-list" id="picker-list"></div>
+      <button type="button" class="btn-secondary full" id="picker-all">All Portfolios</button>
+      <button type="button" class="btn-secondary full" id="picker-close">Close</button>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
