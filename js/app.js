@@ -640,17 +640,23 @@ function allPortfoliosTotals() {
 
   const changePct = weightedPrev > 0 ? (changeUsd / weightedPrev) * 100 : null;
 
-  // Allocation only from portfolios included in the main total
+  // Allocation + coin balances only from portfolios included in the main total
   const byCoin = {};
   for (const item of perPf) {
     if (!item.included) continue;
     for (const r of item.rows) {
-      if (!byCoin[r.coinId]) byCoin[r.coinId] = 0;
-      byCoin[r.coinId] += r.usd;
+      if (!byCoin[r.coinId]) byCoin[r.coinId] = { usd: 0, balance: 0 };
+      byCoin[r.coinId].usd += r.usd;
+      byCoin[r.coinId].balance += r.balance;
     }
   }
   const allocRows = Object.entries(byCoin)
-    .map(([coinId, usd]) => ({ coinId, usd, alloc: totalUsd > 0 ? (usd / totalUsd) * 100 : 0 }))
+    .map(([coinId, { usd, balance }]) => ({
+      coinId,
+      usd,
+      balance,
+      alloc: totalUsd > 0 ? (usd / totalUsd) * 100 : 0,
+    }))
     .sort((a, b) => b.usd - a.usd);
 
   return { totalUsd, changeUsd, changePct, perPf, allocRows, includedCount, excludedCount };
@@ -747,6 +753,38 @@ function renderAllocBar(el, rows) {
   }
 }
 
+/** Total coin amounts across portfolios included in the main balance. */
+function renderHomeCoinTotals(allocRows) {
+  const el = document.getElementById("home-coin-totals");
+  if (!el) return;
+
+  const rows = (allocRows || []).filter((r) => r.balance > 0);
+  if (!rows.length) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+
+  el.hidden = false;
+  el.innerHTML = rows
+    .map((r) => {
+      const coin = COIN_BY_ID[r.coinId];
+      if (!coin) return "";
+      const color = coin.color || "#3861fb";
+      return `
+        <div class="home-coin-row">
+          <div class="home-coin-left">
+            <span class="home-coin-dot" style="background:${color}" aria-hidden="true"></span>
+            <span class="home-coin-amt mono">${escapeHtml(formatAmt(r.balance, coin.symbol))}</span>
+          </div>
+          <span class="home-coin-usd muted">${formatUsd(r.usd)}</span>
+        </div>
+      `;
+    })
+    .filter(Boolean)
+    .join("");
+}
+
 function setChangePill(container, changeUsd, changePct) {
   const { text, cls } = formatChangeUsd(changeUsd, changePct);
   container.innerHTML = `<span class="pill ${cls}">${text}</span><span class="muted">24h</span>`;
@@ -822,6 +860,7 @@ function renderHome() {
   document.getElementById("home-total").textContent = formatUsd(totalUsd);
   setChangePill(document.getElementById("home-change"), changeUsd, changePct);
   renderAllocBar(document.getElementById("home-alloc-bar"), allocRows);
+  renderHomeCoinTotals(allocRows);
 
   const scopeEl = document.getElementById("home-scope-hint");
   if (scopeEl) {
