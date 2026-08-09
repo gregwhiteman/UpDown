@@ -929,30 +929,6 @@ button.holding-row:active {
   font-size: 0.75rem;
 }
 
-/* Coin logos from /logo */
-.coin-avatar.has-logo {
-  background: #fff !important;
-  padding: 6px;
-  box-sizing: border-box;
-}
-
-.coin-avatar.has-logo .coin-logo {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  display: block;
-  pointer-events: none;
-}
-
-/* Full circular brand marks (btc, hbar, ltc, doge) fill the avatar */
-.coin-avatar.has-logo.logo-fill {
-  padding: 0;
-}
-
-.coin-avatar.has-logo.logo-fill .coin-logo {
-  object-fit: cover;
-}
-
 .holding-name {
   font-weight: 600;
   font-size: 0.92rem;

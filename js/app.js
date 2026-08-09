@@ -19,7 +19,6 @@ const COINS = [
     geckoId: "bitcoin",
     decimals: 8,
     color: "#f7931a",
-    logo: "logo/btc.svg",
     placeholder: "bc1… / 1… / 3…",
     note: "Native BTC address (SegWit, Legacy, or Taproot).",
     explorer: (a) => `https://mempool.space/address/${a}`,
@@ -31,8 +30,7 @@ const COINS = [
     symbol: "XRP",
     geckoId: "ripple",
     decimals: 6,
-    color: "#00aae4",
-    logo: "logo/xrp.svg",
+    color: "#23292f",
     placeholder: "r…",
     note: "Classic XRPL address starting with r.",
     explorer: (a) => `https://livenet.xrpl.org/accounts/${a}`,
@@ -44,8 +42,7 @@ const COINS = [
     symbol: "XLM",
     geckoId: "stellar",
     decimals: 7,
-    color: "#14b6e7",
-    logo: "logo/xlm.svg",
+    color: "#000000",
     placeholder: "G…",
     note: "Public key starting with G.",
     explorer: (a) => `https://stellarchain.io/accounts/${a}`,
@@ -58,7 +55,6 @@ const COINS = [
     geckoId: "hedera-hashgraph",
     decimals: 8,
     color: "#8259ef",
-    logo: "logo/hbar.svg",
     placeholder: "0.0.12345",
     note: "Account ID (0.0.x).",
     explorer: (a) => `https://hashscan.io/mainnet/account/${a}`,
@@ -71,7 +67,6 @@ const COINS = [
     geckoId: "cardano",
     decimals: 6,
     color: "#0033ad",
-    logo: "logo/ada.svg",
     placeholder: "addr1…",
     note: "Payment address (addr1…).",
     explorer: (a) => `https://cardanoscan.io/address/${a}`,
@@ -83,8 +78,7 @@ const COINS = [
     symbol: "NIGHT",
     geckoId: "midnight-3",
     decimals: 6,
-    color: "#7c3aed",
-    logo: "logo/night.svg",
+    color: "#0a0a0a",
     placeholder: "addr1… holding NIGHT",
     note: "NIGHT as a Cardano native asset — use the Cardano address that holds NIGHT.",
     explorer: (a) => `https://cardanoscan.io/address/${a}`,
@@ -97,7 +91,6 @@ const COINS = [
     geckoId: "dogecoin",
     decimals: 8,
     color: "#c2a633",
-    logo: "logo/dogecoin.svg",
     placeholder: "D…",
     note: "Dogecoin mainnet address.",
     explorer: (a) => `https://dogechain.info/address/${a}`,
@@ -110,7 +103,6 @@ const COINS = [
     geckoId: "litecoin",
     decimals: 8,
     color: "#345d9d",
-    logo: "logo/litecoin.svg",
     placeholder: "ltc1… / L… / M…",
     note: "Litecoin address.",
     explorer: (a) => `https://litecoinspace.org/address/${a}`,
@@ -536,39 +528,23 @@ function iconContrast(hex) {
   return lum < 0.55 ? "#fff" : "#0d1421";
 }
 
-/** Circular brand marks that already fill a disc — use cover crop. */
-const LOGO_FILL_IDS = new Set(["btc", "hbar", "ltc", "doge"]);
-
-/** HTML for a coin avatar using logo/ SVGs (falls back to symbol text). */
+/** HTML for a coin avatar using official brand color + symbol. */
 function coinAvatarHtml(coin, { lg = false } = {}) {
-  const cls = [lg ? "coin-avatar lg" : "coin-avatar"];
-  if (coin?.logo) {
-    cls.push("has-logo");
-    if (LOGO_FILL_IDS.has(coin.id)) cls.push("logo-fill");
-    return `<div class="${cls.join(" ")}" title="${escapeHtml(coin.symbol)}">
-      <img src="${escapeHtml(coin.logo)}" alt="" class="coin-logo" width="36" height="36" loading="lazy" decoding="async" />
-    </div>`;
-  }
-  const fg = iconContrast(coin?.color || "#3861fb");
-  return `<div class="${cls.join(" ")}" style="background:${coin?.color || "#3861fb"};color:${fg}">${escapeHtml((coin?.symbol || "?").slice(0, 4))}</div>`;
+  const cls = lg ? "coin-avatar lg" : "coin-avatar";
+  const bg = coin?.color || "#3861fb";
+  const fg = iconContrast(bg);
+  return `<div class="${cls}" style="background:${bg};color:${fg}" title="${escapeHtml(coin?.symbol || "")}">${escapeHtml((coin?.symbol || "?").slice(0, 4))}</div>`;
 }
 
-/** Fill an existing avatar element with logo or symbol. */
+/** Fill an existing avatar element with brand color + symbol. */
 function setCoinAvatarEl(el, coin) {
   if (!el || !coin) return;
   el.classList.add("coin-avatar");
-  if (coin.logo) {
-    el.classList.add("has-logo");
-    el.classList.toggle("logo-fill", LOGO_FILL_IDS.has(coin.id));
-    el.style.background = "";
-    el.style.color = "";
-    el.innerHTML = `<img src="${escapeHtml(coin.logo)}" alt="" class="coin-logo" width="48" height="48" decoding="async" />`;
-  } else {
-    el.classList.remove("has-logo", "logo-fill");
-    el.style.background = coin.color || "#3861fb";
-    el.style.color = iconContrast(coin.color || "#3861fb");
-    el.textContent = coin.symbol.slice(0, 4);
-  }
+  el.classList.remove("has-logo", "logo-fill");
+  el.innerHTML = "";
+  el.style.background = coin.color || "#3861fb";
+  el.style.color = iconContrast(coin.color || "#3861fb");
+  el.textContent = coin.symbol.slice(0, 4);
 }
 
 function escapeHtml(str) {
