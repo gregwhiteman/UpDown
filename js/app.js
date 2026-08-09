@@ -1699,25 +1699,11 @@ function render() {
 
 /** Dashboard: aggregated coin holdings from portfolios included in the total. */
 function renderHome() {
-  const { totalUsd, changeUsd, changePct, allocRows, excludedCount } = allPortfoliosTotals();
+  const { totalUsd, changeUsd, changePct, allocRows } = allPortfoliosTotals();
   document.getElementById("home-total").textContent = formatUsd(totalUsd);
   setChangePill(document.getElementById("home-change"), changeUsd, changePct);
   renderAllocBar(document.getElementById("home-alloc-bar"), allocRows);
   updateHomeChart(allocRows);
-
-  const scopeEl = document.getElementById("home-scope-hint");
-  if (scopeEl) {
-    if (excludedCount > 0) {
-      scopeEl.hidden = false;
-      scopeEl.textContent =
-        excludedCount === 1
-          ? "1 portfolio excluded from total"
-          : `${excludedCount} portfolios excluded from total`;
-    } else {
-      scopeEl.hidden = true;
-      scopeEl.textContent = "";
-    }
-  }
 
   const list = document.getElementById("home-holdings-list");
   const empty = document.getElementById("home-empty");

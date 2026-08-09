@@ -574,11 +574,17 @@ button {
 
 .alloc-bar {
   margin-top: 14px;
-  height: 6px;
+  height: 12px;
   border-radius: 99px;
   background: rgba(255, 255, 255, 0.06);
   overflow: hidden;
   display: flex;
+}
+
+/* Dashboard allocation bar — a bit thicker after removing scope hint */
+#home-alloc-bar {
+  height: 14px;
+  margin-top: 12px;
 }
 
 .alloc-seg {
@@ -852,13 +858,6 @@ button {
 
 .switch input:focus-visible + .switch-track {
   box-shadow: 0 0 0 3px rgba(56, 97, 251, 0.35);
-}
-
-.scope-hint {
-  margin: 10px 0 0;
-  font-size: 0.78rem;
-  color: var(--warn, #f59e0b);
-  font-weight: 500;
 }
 
 .home-sub {
