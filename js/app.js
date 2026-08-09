@@ -1335,18 +1335,27 @@ async function refreshAll({ fromPull } = {}) {
   }
 }
 
-// ── Pull to refresh ────────────────────────────────────────────────────────
-// Uses padding-top (--ptr-offset) instead of transform on the scroll container,
-// which avoids iOS Safari getting stuck mid-overscroll after refresh.
+// ── Pull to refresh (CMC-style) ────────────────────────────────────────────
+// Scroll is the default. PTR only engages when:
+//   1) content is already at the top, AND
+//   2) the finger pulls DOWN past an activation dead-zone.
+// Normal scroll (finger up / content move) is never stolen.
 
 const PTR = {
-  threshold: 64,
-  maxPull: 110,
-  holdOffset: 48,
-  resistance: 0.45,
+  /** Finger must pull this far past top before we claim the gesture (px). */
+  activateAt: 18,
+  /** Finger pull distance to arm refresh on release (px). */
+  threshold: 90,
+  /** Visual hold while refreshing (px). */
+  holdOffset: 52,
+  /** Max visual pull (px). */
+  maxVisual: 120,
   startY: 0,
-  pulling: false,
-  tracking: false,
+  startX: 0,
+  /** Touch began at top of list — candidate for PTR. */
+  canPull: false,
+  /** We've claimed this gesture (preventDefault + rubber band). */
+  active: false,
   armed: false,
   distance: 0,
   offset: 0,
@@ -1356,10 +1365,22 @@ function getViewsEl() {
   return document.getElementById("views");
 }
 
+function isAtScrollTop(el) {
+  // Allow 1px of iOS subpixel / bounce noise
+  return !!el && el.scrollTop <= 1;
+}
+
+/** Rubber-band visual distance from finger travel (diminishing). */
+function ptrVisualFromPull(pullPx) {
+  if (pullPx <= 0) return 0;
+  // Soft spring: never jumps to max instantly
+  const v = PTR.maxVisual * (1 - Math.exp(-pullPx / 95));
+  return Math.min(PTR.maxVisual, v);
+}
+
 function setPtrCssOffset(px) {
   const views = getViewsEl();
   const val = `${Math.max(0, px || 0)}px`;
-  // Set on both: views padding uses it; indicator height uses it (on :root via app)
   document.documentElement.style.setProperty("--ptr-offset", val);
   if (views) views.style.setProperty("--ptr-offset", val);
 }
@@ -1374,7 +1395,7 @@ function setPtrOffset(px, { mode } = {}) {
   PTR.offset = offset;
   setPtrCssOffset(offset);
 
-  const show = offset > 2 || mode === "refreshing";
+  const show = offset > 1 || mode === "refreshing";
   ptr.classList.toggle("visible", show);
   ptr.classList.toggle("refreshing", mode === "refreshing");
   ptr.setAttribute("aria-hidden", show ? "false" : "true");
@@ -1387,36 +1408,39 @@ function setPtrOffset(px, { mode } = {}) {
     return;
   }
 
-  // Armed when finger pull distance crosses threshold
   PTR.armed = PTR.distance >= PTR.threshold;
   ptr.classList.toggle("armed", PTR.armed && !refreshInFlight);
 
   if (!refreshInFlight) {
     if (ptrIcon) ptrIcon.textContent = "↓";
-    if (ptrLabel) ptrLabel.textContent = PTR.armed ? "Release to refresh" : "Pull to refresh";
+    if (ptrLabel) {
+      ptrLabel.textContent = PTR.armed ? "Release to refresh" : "Pull to refresh";
+    }
   }
+}
+
+function clearPtrStateFlags() {
+  PTR.canPull = false;
+  PTR.active = false;
+  PTR.armed = false;
+  PTR.distance = 0;
 }
 
 function resetPtrVisual({ animate } = {}) {
   const views = getViewsEl();
   const ptr = document.getElementById("ptr-indicator");
+  const current = PTR.offset || 0;
 
-  PTR.distance = 0;
-  PTR.pulling = false;
-  PTR.tracking = false;
-  PTR.armed = false;
-
-  const current =
-    PTR.offset ||
-    parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--ptr-offset")) ||
-    0;
+  clearPtrStateFlags();
   PTR.offset = 0;
 
   const finishClear = () => {
     if (views) {
-      views.classList.remove("ptr-animating", "ptr-snapping");
+      views.classList.remove("ptr-animating", "ptr-active");
       views.style.transform = "";
       views.style.removeProperty("--ptr-offset");
+      // Hard-settle scroll if iOS left a rubber-band
+      if (views.scrollTop < 0) views.scrollTop = 0;
     }
     document.documentElement.style.removeProperty("--ptr-offset");
     if (ptr) {
@@ -1430,21 +1454,30 @@ function resetPtrVisual({ animate } = {}) {
     }
   };
 
-  if (animate && current > 0) {
+  if (animate && current > 1) {
     if (views) views.classList.add("ptr-animating");
-    // Ensure transition starts from current offset
     setPtrCssOffset(current);
     void (views && views.offsetHeight);
     setPtrCssOffset(0);
-    const onEnd = () => finishClear();
+    let done = false;
+    const onEnd = () => {
+      if (done) return;
+      done = true;
+      finishClear();
+    };
     if (views) views.addEventListener("transitionend", onEnd, { once: true });
-    setTimeout(onEnd, 300);
+    setTimeout(onEnd, 280);
   } else {
     finishClear();
   }
+}
 
-  // Ensure scroll is not left in a rubber-band hole
-  if (views && views.scrollTop < 0) views.scrollTop = 0;
+function abandonPullGesture() {
+  if (PTR.active || PTR.offset > 0) {
+    resetPtrVisual({ animate: false });
+  } else {
+    clearPtrStateFlags();
+  }
 }
 
 function wirePullToRefresh() {
@@ -1454,18 +1487,19 @@ function wirePullToRefresh() {
   views.addEventListener(
     "touchstart",
     (e) => {
-      if (refreshInFlight) return;
-      // Only begin a pull when already at (or very near) the top
-      if (views.scrollTop > 2) {
-        PTR.tracking = false;
-        PTR.pulling = false;
+      if (refreshInFlight) {
+        abandonPullGesture();
         return;
       }
-      PTR.startY = e.touches[0].clientY;
-      PTR.tracking = true;
-      PTR.pulling = false;
-      PTR.armed = false;
+      const t = e.touches[0];
+      PTR.startY = t.clientY;
+      PTR.startX = t.clientX;
       PTR.distance = 0;
+      PTR.armed = false;
+      PTR.active = false;
+      // Only candidates at the very top — otherwise pure scroll
+      PTR.canPull = isAtScrollTop(views);
+      if (!PTR.canPull) PTR.offset = 0;
     },
     { passive: true }
   );
@@ -1473,55 +1507,95 @@ function wirePullToRefresh() {
   views.addEventListener(
     "touchmove",
     (e) => {
-      if (!PTR.tracking || refreshInFlight) return;
+      if (!PTR.canPull || refreshInFlight) return;
 
-      const dy = e.touches[0].clientY - PTR.startY;
+      const t = e.touches[0];
+      const dy = t.clientY - PTR.startY; // >0 = finger down = overscroll at top
+      const dx = t.clientX - PTR.startX;
 
-      // User scrolled content down — cancel pull tracking
-      if (views.scrollTop > 2) {
-        if (PTR.pulling) resetPtrVisual();
-        else {
-          PTR.tracking = false;
-          PTR.pulling = false;
+      // Already scrolled away before we claimed the gesture → pure scroll
+      if (!PTR.active && !isAtScrollTop(views)) {
+        PTR.canPull = false;
+        return;
+      }
+
+      // Horizontal pan — don't steal
+      if (!PTR.active && Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy) * 1.1) {
+        PTR.canPull = false;
+        return;
+      }
+
+      // Finger moving up (content scrolls down the list) — never PTR
+      if (dy <= 0) {
+        if (PTR.active) {
+          // User reversed; drop pull visual and release claim so scroll can resume
+          setPtrOffset(0);
+          PTR.active = false;
+          PTR.distance = 0;
+          PTR.armed = false;
+          views.classList.remove("ptr-active");
         }
         return;
       }
 
-      // Not pulling down past the top
-      if (dy <= 0) {
-        if (PTR.pulling) setPtrOffset(0);
-        PTR.pulling = false;
-        PTR.distance = 0;
-        return;
+      // Still in dead-zone: allow browser/native scroll handling, don't preventDefault
+      if (!PTR.active) {
+        if (dy < PTR.activateAt) return;
+        // Activate only if still glued to the top
+        if (!isAtScrollTop(views)) {
+          PTR.canPull = false;
+          return;
+        }
+        PTR.active = true;
+        views.classList.add("ptr-active");
       }
 
-      // Engage pull-to-refresh
-      PTR.pulling = true;
-      PTR.distance = dy;
+      // Claimed pull: block scroll rubber-band, show PTR UI
       if (e.cancelable) e.preventDefault();
 
-      const eased = Math.min(dy, PTR.maxPull) * PTR.resistance;
-      setPtrOffset(eased);
+      // Distance past activation (pulling "way down")
+      PTR.distance = dy;
+      const visual = ptrVisualFromPull(Math.max(0, dy - PTR.activateAt * 0.35));
+      setPtrOffset(visual);
     },
     { passive: false }
   );
 
   const endPull = () => {
-    if (!PTR.tracking && !PTR.pulling) return;
-    const shouldRefresh = PTR.pulling && PTR.armed && !refreshInFlight;
-    PTR.tracking = false;
-    PTR.pulling = false;
+    if (!PTR.canPull && !PTR.active) return;
+
+    const shouldRefresh = PTR.active && PTR.armed && !refreshInFlight;
+    views.classList.remove("ptr-active");
 
     if (shouldRefresh) {
+      PTR.canPull = false;
+      PTR.active = false;
       setPtrOffset(PTR.holdOffset, { mode: "refreshing" });
       refreshAll({ fromPull: true });
-    } else {
+      return;
+    }
+
+    // Snap back; normal scroll was never blocked unless we had activated
+    if (PTR.active || PTR.offset > 0) {
       resetPtrVisual({ animate: true });
+    } else {
+      clearPtrStateFlags();
     }
   };
 
   views.addEventListener("touchend", endPull, { passive: true });
   views.addEventListener("touchcancel", endPull, { passive: true });
+
+  // If the user scrolls with wheel/trackpad, never leave a stuck pull
+  views.addEventListener(
+    "scroll",
+    () => {
+      if (!PTR.active && !isAtScrollTop(views) && PTR.canPull) {
+        PTR.canPull = false;
+      }
+    },
+    { passive: true }
+  );
 }
 
 // ── UI helpers ─────────────────────────────────────────────────────────────

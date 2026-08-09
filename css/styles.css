@@ -193,8 +193,11 @@ button {
   line-height: 0;
 }
 
+.brand-logo img,
 .brand-logo svg {
   display: block;
+  width: 22px;
+  height: 22px;
   border-radius: 7px;
   box-shadow: 0 2px 8px rgba(56, 97, 251, 0.35);
 }
@@ -267,10 +270,18 @@ button {
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
   padding-bottom: calc(var(--safe-bottom) + 24px);
-  /* Pull offset via padding (not transform) so iOS never gets stuck mid-scroll */
+  /* Pull offset only while actively pulling / refreshing — normal scroll is untouched */
   padding-top: var(--ptr-offset, 0px);
-  overscroll-behavior-y: none;
+  /* Allow native scroll; custom PTR claims gesture only after activation */
+  overscroll-behavior-y: contain;
   touch-action: pan-y;
+}
+
+/* While PTR owns the gesture, kill native overscroll fighting us */
+.views.ptr-active {
+  overscroll-behavior-y: none;
+  /* Prevent scroll chaining jump mid-pull */
+  overflow-anchor: none;
 }
 
 .views.ptr-animating {
