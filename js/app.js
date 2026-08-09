@@ -5,6 +5,7 @@
 
 const STORAGE_KEY = "updown.app.v2";
 const LEGACY_KEY = "updown.addresses.v1";
+const SNAPSHOT_KEY = "updown.market.v1";
 const NIGHT_POLICY_ID = "0691b2fecca1ac4f53cb6dfb00b7013e561d1f34403b957cbb5af1fa";
 const NIGHT_ASSET_NAME = "4e49474854";
 
@@ -18,6 +19,7 @@ const COINS = [
     geckoId: "bitcoin",
     decimals: 8,
     color: "#f7931a",
+    logo: "logo/btc.svg",
     placeholder: "bc1… / 1… / 3…",
     note: "Native BTC address (SegWit, Legacy, or Taproot).",
     explorer: (a) => `https://mempool.space/address/${a}`,
@@ -30,6 +32,7 @@ const COINS = [
     geckoId: "ripple",
     decimals: 6,
     color: "#00aae4",
+    logo: "logo/xrp.svg",
     placeholder: "r…",
     note: "Classic XRPL address starting with r.",
     explorer: (a) => `https://livenet.xrpl.org/accounts/${a}`,
@@ -42,6 +45,7 @@ const COINS = [
     geckoId: "stellar",
     decimals: 7,
     color: "#14b6e7",
+    logo: "logo/xlm.svg",
     placeholder: "G…",
     note: "Public key starting with G.",
     explorer: (a) => `https://stellarchain.io/accounts/${a}`,
@@ -54,6 +58,7 @@ const COINS = [
     geckoId: "hedera-hashgraph",
     decimals: 8,
     color: "#8259ef",
+    logo: "logo/hbar.svg",
     placeholder: "0.0.12345",
     note: "Account ID (0.0.x).",
     explorer: (a) => `https://hashscan.io/mainnet/account/${a}`,
@@ -66,6 +71,7 @@ const COINS = [
     geckoId: "cardano",
     decimals: 6,
     color: "#0033ad",
+    logo: "logo/ada.svg",
     placeholder: "addr1…",
     note: "Payment address (addr1…).",
     explorer: (a) => `https://cardanoscan.io/address/${a}`,
@@ -78,6 +84,7 @@ const COINS = [
     geckoId: "midnight-3",
     decimals: 6,
     color: "#7c3aed",
+    logo: "logo/night.svg",
     placeholder: "addr1… holding NIGHT",
     note: "NIGHT as a Cardano native asset — use the Cardano address that holds NIGHT.",
     explorer: (a) => `https://cardanoscan.io/address/${a}`,
@@ -90,6 +97,7 @@ const COINS = [
     geckoId: "dogecoin",
     decimals: 8,
     color: "#c2a633",
+    logo: "logo/dogecoin.svg",
     placeholder: "D…",
     note: "Dogecoin mainnet address.",
     explorer: (a) => `https://dogechain.info/address/${a}`,
@@ -102,6 +110,7 @@ const COINS = [
     geckoId: "litecoin",
     decimals: 8,
     color: "#345d9d",
+    logo: "logo/litecoin.svg",
     placeholder: "ltc1… / L… / M…",
     note: "Litecoin address.",
     explorer: (a) => `https://litecoinspace.org/address/${a}`,
@@ -113,23 +122,127 @@ const COIN_BY_ID = Object.fromEntries(COINS.map((c) => [c.id, c]));
 
 // ── App state ──────────────────────────────────────────────────────────────
 
-/** @type {{ version: number, activePortfolioId: string|null, portfolios: Portfolio[] }} */
+/** @type {{ version: number, activePortfolioId: string|null, exchangeFeePct: number, portfolios: Portfolio[] }} */
 let store = loadStore();
+
+/** When true, don't overwrite manual price field with live market price. */
+let manualPriceDirty = false;
+/** Last coinId we prefilled price for (reset dirty on coin change). */
+let manualPriceCoinId = null;
 
 /** @type {Record<string, { usd: number, change24h: number }>} */
 let prices = {};
 
 /**
- * Cached CoinGecko 24h market charts: coinId → { fetchedAt, points: [ts, price][] }
+ * Cached CoinGecko market charts: `${coinId}:${days}` → { fetchedAt, points }
  * @type {Record<string, { fetchedAt: number, points: [number, number][] }>}
  */
 let chartCache = {};
+
+/** Selected dashboard chart range (CoinGecko days param). */
+let chartRange = "1";
+
+/** Last holdings used for the chart (for range tab / retry reloads). */
+let lastChartHoldings = [];
 
 /**
  * balanceCache[portfolioId][coinId][address] = { balance, error, loading }
  * @type {Record<string, Record<string, Record<string, { balance: number|null, error: string|null, loading: boolean }>>>}
  */
 let balanceCache = {};
+
+/** Chart fetch in progress (for global header spinner). */
+let chartLoading = false;
+
+/**
+ * Load last-known prices + on-chain balances so the UI never flashes $0 on refresh.
+ */
+function loadMarketSnapshot() {
+  try {
+    const raw = localStorage.getItem(SNAPSHOT_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (data?.prices && typeof data.prices === "object") {
+      prices = data.prices;
+    }
+    if (data?.balances && typeof data.balances === "object") {
+      // Restore balances but never restore as "loading"
+      for (const pfId of Object.keys(data.balances)) {
+        balanceCache[pfId] = balanceCache[pfId] || {};
+        for (const coinId of Object.keys(data.balances[pfId] || {})) {
+          balanceCache[pfId][coinId] = balanceCache[pfId][coinId] || {};
+          for (const addr of Object.keys(data.balances[pfId][coinId] || {})) {
+            const row = data.balances[pfId][coinId][addr];
+            if (!row || typeof row !== "object") continue;
+            balanceCache[pfId][coinId][addr] = {
+              balance: row.balance != null && Number.isFinite(Number(row.balance)) ? Number(row.balance) : null,
+              error: row.error || null,
+              loading: false,
+            };
+          }
+        }
+      }
+    }
+  } catch {
+    /* ignore corrupt snapshot */
+  }
+}
+
+/** Persist prices + successful balances for the next page load / mid-refresh display. */
+function saveMarketSnapshot() {
+  try {
+    const balances = {};
+    for (const pfId of Object.keys(balanceCache)) {
+      balances[pfId] = {};
+      for (const coinId of Object.keys(balanceCache[pfId] || {})) {
+        balances[pfId][coinId] = {};
+        for (const addr of Object.keys(balanceCache[pfId][coinId] || {})) {
+          const row = balanceCache[pfId][coinId][addr];
+          if (!row) continue;
+          // Keep last good balance even if currently errored
+          if (row.balance != null && Number.isFinite(row.balance)) {
+            balances[pfId][coinId][addr] = {
+              balance: row.balance,
+              error: null,
+              loading: false,
+            };
+          }
+        }
+      }
+    }
+    localStorage.setItem(
+      SNAPSHOT_KEY,
+      JSON.stringify({
+        prices,
+        balances,
+        savedAt: Date.now(),
+      })
+    );
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+function anyBalancesLoading() {
+  for (const pfId of Object.keys(balanceCache)) {
+    for (const coinId of Object.keys(balanceCache[pfId] || {})) {
+      for (const addr of Object.keys(balanceCache[pfId][coinId] || {})) {
+        if (balanceCache[pfId][coinId][addr]?.loading) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Show/hide the global top-right spinner while any network work is in flight. */
+function updateGlobalSpinner() {
+  const el = document.getElementById("global-spinner");
+  if (!el) return;
+  const busy = refreshInFlight || chartLoading || anyBalancesLoading();
+  el.hidden = !busy;
+  el.setAttribute("aria-hidden", busy ? "false" : "true");
+  document.body.classList.toggle("is-data-loading", busy);
+}
 
 /** Navigation stack state */
 let nav = {
@@ -147,9 +260,15 @@ function uid() {
   return crypto.randomUUID?.() || `p_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 }
 
-/** @returns {{ addresses: string[], manual: { id: string, amount: number, label: string }[] }} */
+/**
+ * @returns {{
+ *   addresses: string[],
+ *   manual: { id: string, amount: number, label: string, unitPrice: number|null }[],
+ *   costBasisUsd: number
+ * }}
+ */
 function emptyCoinHolding() {
-  return { addresses: [], manual: [] };
+  return { addresses: [], manual: [], costBasisUsd: 0 };
 }
 
 function emptyHoldings() {
@@ -158,13 +277,21 @@ function emptyHoldings() {
   return h;
 }
 
-/** Normalize legacy array or partial object → { addresses, manual } */
+function parseOptionalUsd(raw) {
+  if (raw == null || raw === "") return null;
+  const n = Number(String(raw).replace(/[$,\s]/g, "").trim());
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n;
+}
+
+/** Normalize legacy array or partial object → { addresses, manual, costBasisUsd } */
 function normalizeCoinHolding(raw) {
   // Legacy: string[] of addresses only
   if (Array.isArray(raw)) {
     return {
       addresses: raw.map(String).filter(Boolean),
       manual: [],
+      costBasisUsd: 0,
     };
   }
   if (raw && typeof raw === "object") {
@@ -174,17 +301,52 @@ function normalizeCoinHolding(raw) {
     let manual = [];
     if (Array.isArray(raw.manual)) {
       manual = raw.manual
-        .map((m) => ({
-          id: m.id || uid(),
-          amount: Number(m.amount),
-          label: String(m.label || "").slice(0, 40),
-        }))
+        .map((m) => {
+          const unitPrice =
+            m.unitPrice != null && Number.isFinite(Number(m.unitPrice)) && Number(m.unitPrice) >= 0
+              ? Number(m.unitPrice)
+              : m.pricePaid != null && Number.isFinite(Number(m.pricePaid)) && Number(m.pricePaid) >= 0
+                ? Number(m.pricePaid)
+                : null;
+          const feePct = normalizeExchangeFeePct(m.feePct);
+          let costUsd = Number(m.costUsd);
+          if (!Number.isFinite(costUsd) || costUsd < 0) {
+            costUsd = unitPrice != null ? manualLotCost(Number(m.amount), unitPrice, feePct) : null;
+          }
+          return {
+            id: m.id || uid(),
+            amount: Number(m.amount),
+            label: String(m.label || "").slice(0, 40),
+            unitPrice,
+            feePct,
+            costUsd: costUsd != null && Number.isFinite(costUsd) ? costUsd : null,
+          };
+        })
         .filter((m) => Number.isFinite(m.amount) && m.amount > 0);
     } else if (raw.manual != null && Number(raw.manual) > 0) {
       // Single number form
-      manual = [{ id: uid(), amount: Number(raw.manual), label: "" }];
+      manual = [{ id: uid(), amount: Number(raw.manual), label: "", unitPrice: null, feePct: 0, costUsd: null }];
     }
-    return { addresses, manual };
+
+    let costBasisUsd = Number(raw.costBasisUsd);
+    if (!Number.isFinite(costBasisUsd) || costBasisUsd < 0) {
+      // Derive from avgBuyPrice if present (legacy/export field)
+      const avg = Number(raw.avgBuyPrice);
+      costBasisUsd = 0;
+      if (Number.isFinite(avg) && avg > 0) {
+        const qty = manual.reduce((s, m) => s + m.amount, 0);
+        if (qty > 0) costBasisUsd = avg * qty;
+      } else {
+        // Sum known manual lots (include fee when stored)
+        costBasisUsd = manual.reduce((s, m) => {
+          if (m.costUsd != null) return s + m.costUsd;
+          if (m.unitPrice != null) return s + (manualLotCost(m.amount, m.unitPrice, m.feePct) || 0);
+          return s;
+        }, 0);
+      }
+    }
+
+    return { addresses, manual, costBasisUsd };
   }
   return emptyCoinHolding();
 }
@@ -212,7 +374,31 @@ function getCoinHolding(pf, coinId) {
   const h = pf.holdings[coinId];
   if (!Array.isArray(h.addresses)) h.addresses = [];
   if (!Array.isArray(h.manual)) h.manual = [];
+  if (!Number.isFinite(h.costBasisUsd) || h.costBasisUsd < 0) h.costBasisUsd = 0;
   return h;
+}
+
+function normalizeExchangeFeePct(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.min(100, Math.round(n * 10000) / 10000);
+}
+
+function getExchangeFeePct() {
+  return normalizeExchangeFeePct(store.exchangeFeePct);
+}
+
+function setExchangeFeePct(raw) {
+  store.exchangeFeePct = normalizeExchangeFeePct(raw);
+  saveStore();
+  return store.exchangeFeePct;
+}
+
+/** Effective lot cost including exchange fee (%). */
+function manualLotCost(amount, unitPrice, feePct) {
+  if (unitPrice == null || !Number.isFinite(unitPrice)) return null;
+  const fee = normalizeExchangeFeePct(feePct);
+  return amount * unitPrice * (1 + fee / 100);
 }
 
 function defaultStore() {
@@ -220,6 +406,7 @@ function defaultStore() {
   return {
     version: 2,
     activePortfolioId: id,
+    exchangeFeePct: 0,
     portfolios: [
       {
         id,
@@ -239,6 +426,7 @@ function loadStore() {
       const parsed = JSON.parse(raw);
       if (parsed?.portfolios?.length) {
         parsed.portfolios = parsed.portfolios.map(normalizePortfolio);
+        parsed.exchangeFeePct = normalizeExchangeFeePct(parsed.exchangeFeePct);
         return parsed;
       }
     }
@@ -258,10 +446,12 @@ function loadStore() {
           holdings[c.id] = {
             addresses: map[c.id].map(String).filter(Boolean),
             manual: [],
+            costBasisUsd: 0,
           };
         }
       }
       const migrated = {
+        exchangeFeePct: 0,
         version: 2,
         activePortfolioId: id,
         portfolios: [{ id, name: "Main", createdAt: Date.now(), includeInTotal: true, holdings }],
@@ -344,6 +534,41 @@ function iconContrast(hex) {
   const b = parseInt(c.slice(4, 6), 16);
   const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
   return lum < 0.55 ? "#fff" : "#0d1421";
+}
+
+/** Circular brand marks that already fill a disc — use cover crop. */
+const LOGO_FILL_IDS = new Set(["btc", "hbar", "ltc", "doge"]);
+
+/** HTML for a coin avatar using logo/ SVGs (falls back to symbol text). */
+function coinAvatarHtml(coin, { lg = false } = {}) {
+  const cls = [lg ? "coin-avatar lg" : "coin-avatar"];
+  if (coin?.logo) {
+    cls.push("has-logo");
+    if (LOGO_FILL_IDS.has(coin.id)) cls.push("logo-fill");
+    return `<div class="${cls.join(" ")}" title="${escapeHtml(coin.symbol)}">
+      <img src="${escapeHtml(coin.logo)}" alt="" class="coin-logo" width="36" height="36" loading="lazy" decoding="async" />
+    </div>`;
+  }
+  const fg = iconContrast(coin?.color || "#3861fb");
+  return `<div class="${cls.join(" ")}" style="background:${coin?.color || "#3861fb"};color:${fg}">${escapeHtml((coin?.symbol || "?").slice(0, 4))}</div>`;
+}
+
+/** Fill an existing avatar element with logo or symbol. */
+function setCoinAvatarEl(el, coin) {
+  if (!el || !coin) return;
+  el.classList.add("coin-avatar");
+  if (coin.logo) {
+    el.classList.add("has-logo");
+    el.classList.toggle("logo-fill", LOGO_FILL_IDS.has(coin.id));
+    el.style.background = "";
+    el.style.color = "";
+    el.innerHTML = `<img src="${escapeHtml(coin.logo)}" alt="" class="coin-logo" width="48" height="48" decoding="async" />`;
+  } else {
+    el.classList.remove("has-logo", "logo-fill");
+    el.style.background = coin.color || "#3861fb";
+    el.style.color = iconContrast(coin.color || "#3861fb");
+    el.textContent = coin.symbol.slice(0, 4);
+  }
 }
 
 function escapeHtml(str) {
@@ -501,76 +726,134 @@ async function fetchPrices() {
   const data = await fetchJson(
     `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`
   );
-  const next = {};
+  const next = { ...prices };
+  let any = false;
   for (const coin of COINS) {
     const row = data[coin.geckoId];
-    next[coin.id] = { usd: row?.usd ?? 0, change24h: row?.usd_24h_change ?? 0 };
+    if (row && row.usd != null && Number.isFinite(Number(row.usd))) {
+      next[coin.id] = {
+        usd: Number(row.usd),
+        change24h: Number(row.usd_24h_change) || 0,
+      };
+      any = true;
+    }
+    // If this coin is missing from the response, keep previous price
   }
-  prices = next;
+  if (any) prices = next;
 }
 
 const CHART_CACHE_MS = 5 * 60 * 1000;
 
-/** Fetch (or reuse) 24h price series for a coin from CoinGecko. */
-async function fetchCoinChart24h(coinId) {
+const CHART_RANGES = {
+  "1": { label: "24H", days: "1", spanMs: 24 * 3600 * 1000 },
+  "7": { label: "7D", days: "7", spanMs: 7 * 24 * 3600 * 1000 },
+  "30": { label: "30D", days: "30", spanMs: 30 * 24 * 3600 * 1000 },
+  "90": { label: "90D", days: "90", spanMs: 90 * 24 * 3600 * 1000 },
+  max: { label: "ALL", days: "max", spanMs: 10 * 365 * 24 * 3600 * 1000 },
+};
+
+function chartCacheKey(coinId, days) {
+  return `${coinId}:${days}`;
+}
+
+function rangeSpanMs(days) {
+  return CHART_RANGES[days]?.spanMs ?? 24 * 3600 * 1000;
+}
+
+/** Fetch (or reuse) price series for a coin from CoinGecko for the given days. */
+async function fetchCoinChart(coinId, days = "1") {
   const coin = COIN_BY_ID[coinId];
   if (!coin) return [];
-  const cached = chartCache[coinId];
+  const key = chartCacheKey(coinId, days);
+  const cached = chartCache[key];
   if (cached && Date.now() - cached.fetchedAt < CHART_CACHE_MS && cached.points?.length) {
     return cached.points;
   }
-  const data = await fetchJson(
-    `https://api.coingecko.com/api/v3/coins/${encodeURIComponent(coin.geckoId)}/market_chart?vs_currency=usd&days=1`
-  );
-  const points = Array.isArray(data?.prices)
-    ? data.prices
-        .filter((p) => Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]))
-        .map((p) => /** @type {[number, number]} */ ([p[0], p[1]]))
-    : [];
-  chartCache[coinId] = { fetchedAt: Date.now(), points };
-  return points;
+
+  let lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const data = await fetchJson(
+        `https://api.coingecko.com/api/v3/coins/${encodeURIComponent(coin.geckoId)}/market_chart?vs_currency=usd&days=${encodeURIComponent(days)}`,
+        {},
+        20000
+      );
+      const points = Array.isArray(data?.prices)
+        ? data.prices
+            .filter((p) => Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]))
+            .map((p) => /** @type {[number, number]} */ ([p[0], p[1]]))
+        : [];
+      if (points.length) {
+        chartCache[key] = { fetchedAt: Date.now(), points };
+        return points;
+      }
+      lastErr = new Error("Empty chart data");
+    } catch (err) {
+      lastErr = err;
+      const msg = String(err?.message || err);
+      if (/429/.test(msg)) await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+      else if (attempt === 0) await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+  // Stale cache is better than nothing
+  if (cached?.points?.length) return cached.points;
+  throw lastErr || new Error("Chart fetch failed");
 }
 
 /**
- * Build a portfolio USD value series over 24h using current balances × historical prices.
+ * Build a portfolio USD value series using current balances × historical prices.
  * @param {{ coinId: string, balance: number }[]} holdings
- * @returns {Promise<{ t: number, v: number }[]>}
+ * @param {string} days
+ * @returns {Promise<{ series: { t: number, v: number }[], partial: boolean, failed: number }>}
  */
-async function buildPortfolioSeries(holdings) {
+async function buildPortfolioSeries(holdings, days = "1") {
   const active = (holdings || []).filter((h) => h.balance > 0 && COIN_BY_ID[h.coinId]);
-  if (!active.length) return [];
+  if (!active.length) return { series: [], partial: false, failed: 0 };
 
   const seriesByCoin = {};
+  let failed = 0;
   await runPool(
     active.map((h) => async () => {
       try {
-        seriesByCoin[h.coinId] = await fetchCoinChart24h(h.coinId);
+        seriesByCoin[h.coinId] = await fetchCoinChart(h.coinId, days);
       } catch {
-        seriesByCoin[h.coinId] = chartCache[h.coinId]?.points || [];
+        const stale = chartCache[chartCacheKey(h.coinId, days)]?.points;
+        if (stale?.length) seriesByCoin[h.coinId] = stale;
+        else {
+          seriesByCoin[h.coinId] = [];
+          failed += 1;
+        }
       }
     }),
-    3
+    2
   );
 
-  // Common timeline from the densest series
+  // Common timeline from the densest successful series
   let timeline = [];
   for (const h of active) {
     const pts = seriesByCoin[h.coinId] || [];
     if (pts.length > timeline.length) timeline = pts.map((p) => p[0]);
   }
+
   if (timeline.length < 2) {
-    // Fallback: flat line from current total
+    if (failed === active.length) {
+      return { series: [], partial: false, failed };
+    }
+    // Soft fallback only when we have prices but empty charts
     const total = active.reduce((s, h) => s + h.balance * (prices[h.coinId]?.usd || 0), 0);
     const now = Date.now();
-    return [
-      { t: now - 24 * 3600 * 1000, v: total },
-      { t: now, v: total },
-    ];
+    return {
+      series: [
+        { t: now - rangeSpanMs(days), v: total },
+        { t: now, v: total },
+      ],
+      partial: failed > 0,
+      failed,
+    };
   }
 
   function priceAt(points, ts) {
     if (!points?.length) return null;
-    // Binary search nearest
     let lo = 0;
     let hi = points.length - 1;
     if (ts <= points[0][0]) return points[0][1];
@@ -603,24 +886,20 @@ async function buildPortfolioSeries(holdings) {
     }
     if (ok) out.push({ t, v });
   }
-  return out;
+  return { series: out, partial: failed > 0, failed };
 }
 
 /**
- * Draw a 24h area chart into an SVG element.
+ * Draw an area chart into an SVG element.
  * @param {SVGElement} svg
  * @param {{ t: number, v: number }[]} series
- * @param {HTMLElement|null} emptyEl
  */
-function renderSparkline(svg, series, emptyEl) {
-  if (!svg) return;
-  const empty = emptyEl;
+function renderSparkline(svg, series) {
+  if (!svg) return false;
   if (!series || series.length < 2) {
     svg.innerHTML = "";
-    if (empty) empty.hidden = false;
-    return;
+    return false;
   }
-  if (empty) empty.hidden = true;
 
   const W = 320;
   const H = 96;
@@ -647,14 +926,13 @@ function renderSparkline(svg, series, emptyEl) {
   const yAt = (v) => padY + (1 - (v - min) / (max - min)) * (H - padY * 2);
 
   let line = "";
-  let area = "";
   for (let i = 0; i < series.length; i++) {
     const x = xAt(i);
     const y = yAt(series[i].v);
     line += i === 0 ? `M ${x.toFixed(2)} ${y.toFixed(2)}` : ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
   }
   const yBase = H;
-  area =
+  const area =
     line +
     ` L ${xAt(series.length - 1).toFixed(2)} ${yBase} L ${xAt(0).toFixed(2)} ${yBase} Z`;
 
@@ -669,45 +947,107 @@ function renderSparkline(svg, series, emptyEl) {
     <path d="${area}" fill="url(#${fillId})" />
     <path d="${line}" fill="none" stroke="${stroke}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
   `;
+  return true;
 }
 
 let chartRenderToken = 0;
 
-/** Load and paint the dashboard 24h portfolio chart from included holdings. */
-async function updateHomeChart(allocRows) {
+/** @param {"loading"|"error"|"empty"|"ok"|"partial"} state */
+function setChartOverlay(state, message) {
+  const overlay = document.getElementById("home-chart-overlay");
+  const spinner = document.getElementById("home-chart-spinner");
+  const status = document.getElementById("home-chart-status");
+  const retry = document.getElementById("home-chart-retry");
+  const wrap = document.getElementById("home-chart-wrap");
+  if (!overlay) return;
+
+  const show = state !== "ok";
+  overlay.hidden = !show;
+  overlay.classList.toggle("is-error", state === "error");
+  overlay.classList.toggle("is-loading", state === "loading");
+  overlay.classList.toggle("is-partial", state === "partial");
+  if (wrap) {
+    wrap.classList.toggle("is-loading", state === "loading");
+    wrap.classList.toggle("has-error", state === "error" || state === "empty");
+  }
+
+  if (spinner) spinner.hidden = state !== "loading";
+  if (retry) retry.hidden = state !== "error";
+  if (status) status.textContent = message || "";
+}
+
+function syncChartTabs() {
+  document.querySelectorAll("#home-chart-tabs .chart-tab").forEach((btn) => {
+    const active = btn.dataset.range === chartRange;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
+}
+
+/** Load and paint the dashboard portfolio chart for the selected range. */
+async function updateHomeChart(allocRows, { force } = {}) {
   const svg = document.getElementById("home-chart");
-  const empty = document.getElementById("home-chart-empty");
   if (!svg) return;
 
-  const holdings = (allocRows || [])
-    .filter((r) => r.balance > 0)
-    .map((r) => ({ coinId: r.coinId, balance: r.balance }));
+  const holdings =
+    allocRows != null
+      ? (allocRows || [])
+          .filter((r) => r.balance > 0)
+          .map((r) => ({ coinId: r.coinId, balance: r.balance }))
+      : lastChartHoldings;
+
+  lastChartHoldings = holdings;
+  syncChartTabs();
 
   if (!holdings.length) {
     svg.innerHTML = "";
-    if (empty) {
-      empty.hidden = false;
-      empty.textContent = "Add holdings to see the 24h chart";
-    }
+    chartLoading = false;
+    updateGlobalSpinner();
+    setChartOverlay("empty", "Add holdings to see the chart");
     return;
   }
 
   const token = ++chartRenderToken;
-  if (empty) {
-    empty.hidden = false;
-    empty.textContent = "Loading chart…";
-  }
+  const rangeLabel = CHART_RANGES[chartRange]?.label || "24H";
+  chartLoading = true;
+  updateGlobalSpinner();
+  setChartOverlay("loading", `Loading ${rangeLabel} chart…`);
+  // Keep previous SVG visible under dimmed overlay while loading (unless forced clear)
+  if (force) svg.innerHTML = "";
 
   try {
-    const series = await buildPortfolioSeries(holdings);
+    const { series, partial, failed } = await buildPortfolioSeries(holdings, chartRange);
     if (token !== chartRenderToken) return;
-    renderSparkline(svg, series, empty);
-  } catch {
+
+    const ok = renderSparkline(svg, series);
+    if (!ok) {
+      setChartOverlay("error", "Chart didn’t load. Pull to refresh or retry.");
+      return;
+    }
+    if (partial && failed > 0) {
+      setChartOverlay(
+        "partial",
+        failed === 1 ? "Partial data — 1 coin missing" : `Partial data — ${failed} coins missing`
+      );
+      // Auto-hide partial banner after a moment so chart stays readable
+      setTimeout(() => {
+        if (token === chartRenderToken) setChartOverlay("ok");
+      }, 2200);
+    } else {
+      setChartOverlay("ok");
+    }
+  } catch (err) {
     if (token !== chartRenderToken) return;
-    svg.innerHTML = "";
-    if (empty) {
-      empty.hidden = false;
-      empty.textContent = "Chart unavailable";
+    // Keep previous SVG if we had one; only clear when empty
+    if (!svg.innerHTML.trim()) svg.innerHTML = "";
+    const msg = /429|Rate/.test(String(err?.message || err))
+      ? "Rate limited — try again in a moment"
+      : "Chart didn’t load. Tap retry.";
+    setChartOverlay("error", msg);
+  } finally {
+    if (token === chartRenderToken) {
+      chartLoading = false;
+      updateGlobalSpinner();
     }
   }
 }
@@ -781,6 +1121,62 @@ function coinBalanceInPortfolio(pf, coinId) {
 function portfolioHasCoin(pf, coinId) {
   const h = getCoinHolding(pf, coinId);
   return h.addresses.length > 0 || h.manual.length > 0;
+}
+
+/**
+ * Cost basis / avg buy / unrealized P/L for a coin in a portfolio.
+ * Avg buy = costBasisUsd / current balance (when both set).
+ */
+function costBasisInfo(pf, coinId) {
+  const holding = getCoinHolding(pf, coinId);
+  const balInfo = coinBalanceInPortfolio(pf, coinId);
+  const balance = balInfo.hasData ? balInfo.balance : 0;
+  const cost = Number(holding.costBasisUsd) || 0;
+  const avg = balance > 0 && cost > 0 ? cost / balance : null;
+  const px = prices[coinId]?.usd ?? 0;
+  const market = balance * px;
+  const pl = cost > 0 ? market - cost : null;
+  const plPct = cost > 0 && Number.isFinite(pl) ? (pl / cost) * 100 : null;
+  return { cost, avg, market, pl, plPct, balance };
+}
+
+/** Set average buy price → cost basis = avg × current holdings. */
+function setAvgBuyPrice(pf, coinId, avgRaw) {
+  const holding = getCoinHolding(pf, coinId);
+  const avg = parseOptionalUsd(avgRaw);
+  if (avg == null || avg <= 0) {
+    toast("Enter a valid average buy price", "error");
+    return false;
+  }
+  const bal = coinBalanceInPortfolio(pf, coinId);
+  const qty = bal.hasData ? bal.balance : 0;
+  if (qty <= 0) {
+    toast("Add a holding amount first", "error");
+    return false;
+  }
+  holding.costBasisUsd = avg * qty;
+  saveStore();
+  return true;
+}
+
+/** Set total cost basis USD → implies avg = cost / holdings. */
+function setCostBasisUsd(pf, coinId, costRaw) {
+  const holding = getCoinHolding(pf, coinId);
+  const cost = parseOptionalUsd(costRaw);
+  if (cost == null) {
+    toast("Enter a valid cost basis", "error");
+    return false;
+  }
+  holding.costBasisUsd = cost;
+  saveStore();
+  return true;
+}
+
+/** Clear cost basis for a coin. */
+function clearCostBasis(pf, coinId) {
+  const holding = getCoinHolding(pf, coinId);
+  holding.costBasisUsd = 0;
+  saveStore();
 }
 
 function portfolioTotals(pf) {
@@ -876,16 +1272,24 @@ function allPortfoliosTotals() {
 async function refreshBalance(pfId, coinId, addr) {
   const coin = COIN_BY_ID[coinId];
   const slot = ensureCacheSlot(pfId, coinId, addr);
+  // Keep previous balance visible while refreshing (don't zero out)
   slot.loading = true;
-  slot.error = null;
+  updateGlobalSpinner();
   try {
-    slot.balance = await coin.fetchBalance(addr);
-    slot.error = null;
+    const bal = await coin.fetchBalance(addr);
+    if (bal != null && Number.isFinite(Number(bal))) {
+      slot.balance = Number(bal);
+      slot.error = null;
+    } else {
+      // Keep last good balance; surface a soft error
+      slot.error = slot.balance != null ? null : "No balance";
+    }
   } catch (err) {
-    slot.balance = null;
+    // On failure keep last known balance so totals don't flash to $0
     slot.error = humanizeError(err);
   } finally {
     slot.loading = false;
+    updateGlobalSpinner();
   }
 }
 
@@ -906,22 +1310,20 @@ let refreshInFlight = false;
 async function refreshAll({ fromPull } = {}) {
   if (refreshInFlight) return;
   refreshInFlight = true;
+  updateGlobalSpinner();
 
-  const ptr = document.getElementById("ptr-indicator");
-  const ptrIcon = document.getElementById("ptr-icon");
-  const ptrLabel = document.getElementById("ptr-label");
-  if (fromPull && ptr) {
-    ptr.classList.add("visible", "refreshing");
-    ptr.classList.remove("armed");
-    if (ptrIcon) ptrIcon.textContent = "↻";
-    if (ptrLabel) ptrLabel.textContent = "Refreshing…";
+  if (fromPull) {
+    setPtrOffset(PTR.holdOffset, { mode: "refreshing" });
   }
 
   try {
     try {
       await fetchPrices();
+      // Re-render with new prices while balances still show last known values
+      render();
     } catch (err) {
       toast(`Prices: ${humanizeError(err)}`, "error");
+      // Keep prior prices — do not wipe to zero
     }
 
     // Allow pull-to-refresh to pull fresh 24h series
@@ -932,104 +1334,160 @@ async function refreshAll({ fromPull } = {}) {
       for (const coin of COINS) {
         const holding = getCoinHolding(pf, coin.id);
         for (const addr of holding.addresses) {
-          ensureCacheSlot(pf.id, coin.id, addr).loading = true;
+          // Mark loading but keep existing balance for display
+          const slot = ensureCacheSlot(pf.id, coin.id, addr);
+          slot.loading = true;
           jobs.push(() => refreshBalance(pf.id, coin.id, addr));
         }
       }
     }
 
+    updateGlobalSpinner();
     if (jobs.length) {
-      render(); // show loading states
+      render(); // loading flags on, values still from last snapshot
       await runPool(jobs, 4);
     }
 
+    saveMarketSnapshot();
     render();
     toast("Updated", "success");
   } finally {
     refreshInFlight = false;
-    if (ptr) {
-      ptr.classList.remove("visible", "refreshing", "armed");
-      if (ptrIcon) ptrIcon.textContent = "↓";
-      if (ptrLabel) ptrLabel.textContent = "Pull to refresh";
-      ptr.style.transform = "";
-    }
+    updateGlobalSpinner();
+    // Always fully settle PTR so the screen never stays half-scrolled
+    resetPtrVisual({ animate: fromPull });
   }
 }
 
 // ── Pull to refresh ────────────────────────────────────────────────────────
+// Uses padding-top (--ptr-offset) instead of transform on the scroll container,
+// which avoids iOS Safari getting stuck mid-overscroll after refresh.
 
 const PTR = {
-  threshold: 72,
-  maxPull: 120,
+  threshold: 64,
+  maxPull: 110,
+  holdOffset: 48,
+  resistance: 0.45,
   startY: 0,
   pulling: false,
+  tracking: false,
   armed: false,
   distance: 0,
+  offset: 0,
 };
 
-function setPtrPull(distance) {
-  const views = document.getElementById("views");
+function getViewsEl() {
+  return document.getElementById("views");
+}
+
+function setPtrCssOffset(px) {
+  const views = getViewsEl();
+  const val = `${Math.max(0, px || 0)}px`;
+  // Set on both: views padding uses it; indicator height uses it (on :root via app)
+  document.documentElement.style.setProperty("--ptr-offset", val);
+  if (views) views.style.setProperty("--ptr-offset", val);
+}
+
+function setPtrOffset(px, { mode } = {}) {
   const ptr = document.getElementById("ptr-indicator");
   const ptrIcon = document.getElementById("ptr-icon");
   const ptrLabel = document.getElementById("ptr-label");
-  if (!views || !ptr) return;
+  if (!ptr) return;
 
-  PTR.distance = distance;
-  const show = distance > 4;
+  const offset = Math.max(0, px || 0);
+  PTR.offset = offset;
+  setPtrCssOffset(offset);
+
+  const show = offset > 2 || mode === "refreshing";
   ptr.classList.toggle("visible", show);
-  PTR.armed = distance >= PTR.threshold;
-  ptr.classList.toggle("armed", PTR.armed && !refreshInFlight);
+  ptr.classList.toggle("refreshing", mode === "refreshing");
+  ptr.setAttribute("aria-hidden", show ? "false" : "true");
 
-  if (ptrIcon && !refreshInFlight) ptrIcon.textContent = "↓";
-  if (ptrLabel && !refreshInFlight) {
-    ptrLabel.textContent = PTR.armed ? "Release to refresh" : "Pull to refresh";
+  if (mode === "refreshing") {
+    ptr.classList.remove("armed");
+    PTR.armed = false;
+    if (ptrIcon) ptrIcon.textContent = "↻";
+    if (ptrLabel) ptrLabel.textContent = "Refreshing…";
+    return;
   }
 
-  // Ease the pull distance for a rubber-band feel
-  const eased = Math.min(distance, PTR.maxPull) * 0.55;
-  ptr.style.transform = `translateY(calc(-100% + ${eased}px))`;
-  views.style.transform = distance > 0 ? `translateY(${eased}px)` : "";
+  // Armed when finger pull distance crosses threshold
+  PTR.armed = PTR.distance >= PTR.threshold;
+  ptr.classList.toggle("armed", PTR.armed && !refreshInFlight);
+
+  if (!refreshInFlight) {
+    if (ptrIcon) ptrIcon.textContent = "↓";
+    if (ptrLabel) ptrLabel.textContent = PTR.armed ? "Release to refresh" : "Pull to refresh";
+  }
 }
 
 function resetPtrVisual({ animate } = {}) {
-  const views = document.getElementById("views");
+  const views = getViewsEl();
   const ptr = document.getElementById("ptr-indicator");
-  if (views) {
-    if (animate) views.classList.add("ptr-snapping");
-    views.style.transform = "";
-    if (animate) {
-      const done = () => views.classList.remove("ptr-snapping");
-      views.addEventListener("transitionend", done, { once: true });
-      setTimeout(done, 250);
-    }
-  }
-  if (ptr && !refreshInFlight) {
-    ptr.classList.remove("visible", "armed", "refreshing");
-    ptr.style.transform = "";
-    const ptrIcon = document.getElementById("ptr-icon");
-    const ptrLabel = document.getElementById("ptr-label");
-    if (ptrIcon) ptrIcon.textContent = "↓";
-    if (ptrLabel) ptrLabel.textContent = "Pull to refresh";
-  }
+
   PTR.distance = 0;
   PTR.pulling = false;
+  PTR.tracking = false;
   PTR.armed = false;
+
+  const current =
+    PTR.offset ||
+    parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--ptr-offset")) ||
+    0;
+  PTR.offset = 0;
+
+  const finishClear = () => {
+    if (views) {
+      views.classList.remove("ptr-animating", "ptr-snapping");
+      views.style.transform = "";
+      views.style.removeProperty("--ptr-offset");
+    }
+    document.documentElement.style.removeProperty("--ptr-offset");
+    if (ptr) {
+      ptr.classList.remove("visible", "armed", "refreshing");
+      ptr.style.transform = "";
+      ptr.setAttribute("aria-hidden", "true");
+      const ptrIcon = document.getElementById("ptr-icon");
+      const ptrLabel = document.getElementById("ptr-label");
+      if (ptrIcon) ptrIcon.textContent = "↓";
+      if (ptrLabel) ptrLabel.textContent = "Pull to refresh";
+    }
+  };
+
+  if (animate && current > 0) {
+    if (views) views.classList.add("ptr-animating");
+    // Ensure transition starts from current offset
+    setPtrCssOffset(current);
+    void (views && views.offsetHeight);
+    setPtrCssOffset(0);
+    const onEnd = () => finishClear();
+    if (views) views.addEventListener("transitionend", onEnd, { once: true });
+    setTimeout(onEnd, 300);
+  } else {
+    finishClear();
+  }
+
+  // Ensure scroll is not left in a rubber-band hole
+  if (views && views.scrollTop < 0) views.scrollTop = 0;
 }
 
 function wirePullToRefresh() {
-  const views = document.getElementById("views");
+  const views = getViewsEl();
   if (!views) return;
 
   views.addEventListener(
     "touchstart",
     (e) => {
       if (refreshInFlight) return;
-      if (views.scrollTop > 0) {
+      // Only begin a pull when already at (or very near) the top
+      if (views.scrollTop > 2) {
+        PTR.tracking = false;
         PTR.pulling = false;
         return;
       }
       PTR.startY = e.touches[0].clientY;
-      PTR.pulling = true;
+      PTR.tracking = true;
+      PTR.pulling = false;
       PTR.armed = false;
       PTR.distance = 0;
     },
@@ -1039,46 +1497,48 @@ function wirePullToRefresh() {
   views.addEventListener(
     "touchmove",
     (e) => {
-      if (!PTR.pulling || refreshInFlight) return;
-      if (views.scrollTop > 0) {
-        resetPtrVisual();
-        return;
-      }
+      if (!PTR.tracking || refreshInFlight) return;
+
       const dy = e.touches[0].clientY - PTR.startY;
-      if (dy <= 0) {
-        setPtrPull(0);
+
+      // User scrolled content down — cancel pull tracking
+      if (views.scrollTop > 2) {
+        if (PTR.pulling) resetPtrVisual();
+        else {
+          PTR.tracking = false;
+          PTR.pulling = false;
+        }
         return;
       }
-      // Prevent native overscroll while pulling
+
+      // Not pulling down past the top
+      if (dy <= 0) {
+        if (PTR.pulling) setPtrOffset(0);
+        PTR.pulling = false;
+        PTR.distance = 0;
+        return;
+      }
+
+      // Engage pull-to-refresh
+      PTR.pulling = true;
+      PTR.distance = dy;
       if (e.cancelable) e.preventDefault();
-      setPtrPull(dy);
+
+      const eased = Math.min(dy, PTR.maxPull) * PTR.resistance;
+      setPtrOffset(eased);
     },
     { passive: false }
   );
 
   const endPull = () => {
-    if (!PTR.pulling) return;
-    const shouldRefresh = PTR.armed && !refreshInFlight;
-    const ptr = document.getElementById("ptr-indicator");
+    if (!PTR.tracking && !PTR.pulling) return;
+    const shouldRefresh = PTR.pulling && PTR.armed && !refreshInFlight;
+    PTR.tracking = false;
+    PTR.pulling = false;
+
     if (shouldRefresh) {
-      // Park indicator in view while refreshing
-      if (ptr) {
-        ptr.classList.add("visible", "refreshing");
-        ptr.classList.remove("armed");
-        ptr.style.transform = "translateY(8px)";
-        const ptrIcon = document.getElementById("ptr-icon");
-        const ptrLabel = document.getElementById("ptr-label");
-        if (ptrIcon) ptrIcon.textContent = "↻";
-        if (ptrLabel) ptrLabel.textContent = "Refreshing…";
-      }
-      if (views) {
-        views.classList.add("ptr-snapping");
-        views.style.transform = "translateY(48px)";
-      }
-      PTR.pulling = false;
-      refreshAll({ fromPull: true }).finally(() => {
-        resetPtrVisual({ animate: true });
-      });
+      setPtrOffset(PTR.holdOffset, { mode: "refreshing" });
+      refreshAll({ fromPull: true });
     } else {
       resetPtrVisual({ animate: true });
     }
@@ -1138,39 +1598,51 @@ function render() {
 
   const back = document.getElementById("btn-back");
   const settingsBtn = document.getElementById("btn-settings");
+  const brand = document.getElementById("topbar-brand");
   const title = document.getElementById("topbar-title");
   const switchBtn = document.getElementById("btn-portfolio-switch");
+  const topbarRight = document.querySelector(".topbar-right");
 
-  // Same top-left slot: Settings on Dashboard only; Back everywhere else
-  const isDashboard = nav.view === "home";
-  if (settingsBtn) settingsBtn.hidden = !isDashboard;
-  if (back) back.hidden = isDashboard;
+  // Same top-left slot: Settings on home only; Back everywhere else
+  const isHome = nav.view === "home";
+  if (settingsBtn) settingsBtn.hidden = !isHome;
+  if (back) back.hidden = isHome;
 
+  // Portfolio switch sits far right of the header (not under the brand)
+  const showPfSwitch =
+    nav.view === "portfolio" || nav.view === "asset" || nav.view === "add-coin";
+  if (switchBtn) {
+    switchBtn.hidden = !showPfSwitch;
+    if (showPfSwitch) {
+      const pf = getPortfolio(nav.portfolioId) || getActivePortfolio();
+      document.getElementById("active-portfolio-label").textContent = pf?.name || "Portfolio";
+    }
+  }
+  if (topbarRight) topbarRight.classList.toggle("has-switch", showPfSwitch);
+
+  // Center: UpDown brand on home/portfolio; page title elsewhere
   if (nav.view === "home") {
-    title.hidden = false;
-    title.textContent = "Dashboard";
-    switchBtn.hidden = true;
+    if (brand) brand.hidden = false;
+    title.hidden = true;
     renderHome();
   } else if (nav.view === "portfolio") {
+    if (brand) brand.hidden = false;
     title.hidden = true;
-    switchBtn.hidden = false;
-    const pf = getPortfolio(nav.portfolioId);
-    document.getElementById("active-portfolio-label").textContent = pf?.name || "Portfolio";
     renderPortfolio();
   } else if (nav.view === "asset") {
+    if (brand) brand.hidden = true;
     title.hidden = false;
     title.textContent = COIN_BY_ID[nav.coinId]?.symbol || "Asset";
-    switchBtn.hidden = true;
     renderAsset();
   } else if (nav.view === "add-coin") {
+    if (brand) brand.hidden = true;
     title.hidden = false;
     title.textContent = "Add holding";
-    switchBtn.hidden = true;
     renderAddCoin();
   } else if (nav.view === "settings") {
+    if (brand) brand.hidden = true;
     title.hidden = false;
     title.textContent = "Settings";
-    switchBtn.hidden = true;
     renderSettings();
   }
 }
@@ -1231,7 +1703,7 @@ function renderHome() {
     row.setAttribute("role", "row");
     row.innerHTML = `
       <div class="holding-left">
-        <div class="coin-avatar" style="background:${coin.color};color:${iconContrast(coin.color)}">${coin.symbol.slice(0, 4)}</div>
+        ${coinAvatarHtml(coin)}
         <div>
           <div class="holding-name">${escapeHtml(coin.name)}</div>
           <div class="holding-symbol">${coin.symbol}</div>
@@ -1252,6 +1724,12 @@ function renderHome() {
 
 /** Settings: portfolio list + include toggles (management lives here, not on Dashboard). */
 function renderSettings() {
+  const feeInput = document.getElementById("settings-fee-input");
+  if (feeInput && document.activeElement !== feeInput) {
+    const fee = getExchangeFeePct();
+    feeInput.value = fee > 0 ? String(fee) : "";
+  }
+
   const { perPf } = allPortfoliosTotals();
   const list = document.getElementById("portfolio-list");
   const empty = document.getElementById("settings-pf-empty");
@@ -1363,14 +1841,23 @@ function renderPortfolio() {
     const parts = [];
     if (info.manualCount) parts.push(`${info.manualCount} manual`);
     if (info.addrCount) parts.push(`${info.addrCount} wallet${info.addrCount === 1 ? "" : "s"}`);
+    const cb = costBasisInfo(pf, coin.id);
+    if (cb.avg != null) parts.push(`avg ${formatUsd(cb.avg)}`);
     const sub = parts.length ? ` · ${parts.join(" · ")}` : "";
+
+    let plLine = "";
+    if (cb.pl != null) {
+      const sign = cb.pl > 0 ? "+" : "";
+      const cls = cb.pl > 0 ? "up" : cb.pl < 0 ? "down" : "neutral";
+      plLine = `<div class="holding-pl ${cls}">${sign}${formatUsd(cb.pl)}</div>`;
+    }
 
     const row = document.createElement("button");
     row.type = "button";
     row.className = "holding-row";
     row.innerHTML = `
       <div class="holding-left">
-        <div class="coin-avatar" style="background:${coin.color};color:${iconContrast(coin.color)}">${coin.symbol.slice(0, 4)}</div>
+        ${coinAvatarHtml(coin)}
         <div>
           <div class="holding-name">${escapeHtml(coin.name)}</div>
           <div class="holding-symbol">${coin.symbol}${sub}</div>
@@ -1383,6 +1870,7 @@ function renderPortfolio() {
       <div class="holding-right">
         <div class="holding-value">${anyLoading && !info.hasManual ? "…" : usd != null ? formatUsd(usd) : "$0.00"}</div>
         <div class="holding-amount">${info.hasData ? formatAmt(info.balance, coin.symbol) : "—"}</div>
+        ${plLine}
       </div>
     `;
     row.addEventListener("click", () => showView("asset", { coinId: coin.id }));
@@ -1398,10 +1886,7 @@ function renderAsset() {
     return;
   }
 
-  const avatar = document.getElementById("asset-avatar");
-  avatar.textContent = coin.symbol.slice(0, 4);
-  avatar.style.background = coin.color;
-  avatar.style.color = iconContrast(coin.color);
+  setCoinAvatarEl(document.getElementById("asset-avatar"), coin);
 
   document.getElementById("asset-name").textContent = coin.name;
   const px = prices[coin.id]?.usd;
@@ -1437,9 +1922,57 @@ function renderAsset() {
     </div>
   `;
 
+  // Cost basis stats
+  const cb = costBasisInfo(pf, coin.id);
+  document.getElementById("asset-avg-buy").textContent =
+    cb.avg != null ? formatUsd(cb.avg) : "—";
+  document.getElementById("asset-cost-basis").textContent =
+    cb.cost > 0 ? formatUsd(cb.cost) : "—";
+  const plEl = document.getElementById("asset-pl");
+  if (cb.pl != null) {
+    const sign = cb.pl > 0 ? "+" : "";
+    const cls = cb.pl > 0 ? "up" : cb.pl < 0 ? "down" : "neutral";
+    plEl.className = `stat-value ${cls}`;
+    plEl.textContent = `${sign}${formatUsd(cb.pl)}${
+      cb.plPct != null ? ` (${sign}${cb.plPct.toFixed(2)}%)` : ""
+    }`;
+  } else {
+    plEl.className = "stat-value";
+    plEl.textContent = "—";
+  }
+
+  // Prefill cost inputs with current values (don't clobber while typing on re-render after save)
+  const avgInput = document.getElementById("avg-buy-input");
+  const costInput = document.getElementById("cost-basis-input");
+  if (document.activeElement !== avgInput) {
+    avgInput.value = cb.avg != null ? String(roundPriceInput(cb.avg)) : "";
+  }
+  if (document.activeElement !== costInput) {
+    costInput.value = cb.cost > 0 ? String(roundPriceInput(cb.cost)) : "";
+  }
+
   document.getElementById("address-input").placeholder = coin.placeholder;
   document.getElementById("address-hint").textContent = coin.note;
   document.getElementById("manual-amount-input").placeholder = `Amount in ${coin.symbol}`;
+
+  // Price paid: default to live market price (editable). Don't overwrite user edits.
+  if (manualPriceCoinId !== coin.id) {
+    manualPriceCoinId = coin.id;
+    manualPriceDirty = false;
+  }
+  const priceInput = document.getElementById("manual-price-input");
+  priceInput.placeholder = `USD per ${coin.symbol}`;
+  if (document.activeElement !== priceInput && !manualPriceDirty) {
+    priceInput.value = px != null && px > 0 ? String(roundPriceInput(px)) : "";
+  }
+
+  // Exchange fee % (saved setting, editable here)
+  const feeInput = document.getElementById("manual-fee-input");
+  if (feeInput && document.activeElement !== feeInput) {
+    const fee = getExchangeFeePct();
+    feeInput.value = fee > 0 ? String(fee) : "";
+  }
+  updateManualFeeHint();
 
   const holding = getCoinHolding(pf, coin.id);
 
@@ -1454,18 +1987,35 @@ function renderAsset() {
     card.className = "addr-card";
     const v = entry.amount * (px || 0);
     const label = entry.label || "Manual";
+    const lotCost =
+      entry.costUsd != null
+        ? entry.costUsd
+        : entry.unitPrice != null
+          ? manualLotCost(entry.amount, entry.unitPrice, entry.feePct)
+          : null;
+    const feeNote =
+      entry.unitPrice != null && entry.feePct > 0
+        ? ` · fee ${entry.feePct}%`
+        : "";
+    const priceLine =
+      entry.unitPrice != null
+        ? `<span class="muted">@ ${formatUsd(entry.unitPrice)}${feeNote}${
+            lotCost != null ? ` · cost ${formatUsd(lotCost)}` : ""
+          }</span>`
+        : `<span class="muted">No price paid</span>`;
     card.innerHTML = `
       <div class="addr-title"><span class="tag manual">Manual</span>${escapeHtml(label)}</div>
       <div class="addr-meta">
         <span class="ok">${formatAmt(entry.amount, coin.symbol)}</span>
         <span>${formatUsd(v)}</span>
       </div>
+      <div class="addr-meta">${priceLine}</div>
       <div class="addr-actions">
         <button type="button" class="btn-tiny" data-remove>Remove</button>
       </div>
     `;
     card.querySelector("[data-remove]").addEventListener("click", () => {
-      holding.manual = holding.manual.filter((m) => m.id !== entry.id);
+      removeManualEntry(holding, entry);
       saveStore();
       render();
       toast("Manual amount removed");
@@ -1524,7 +2074,7 @@ function renderAddCoin() {
     btn.type = "button";
     btn.className = "coin-pick-row";
     btn.innerHTML = `
-      <div class="coin-avatar" style="background:${coin.color};color:${iconContrast(coin.color)}">${coin.symbol.slice(0, 4)}</div>
+      ${coinAvatarHtml(coin)}
       <div class="grow">
         <div class="name">${escapeHtml(coin.name)}</div>
         <div class="sym">${coin.symbol}</div>
@@ -1680,7 +2230,44 @@ async function addAddressToCurrent(address) {
   toast("Address added", "success");
 }
 
-function addManualToCurrent(amountRaw, labelRaw) {
+function roundPriceInput(n) {
+  if (!Number.isFinite(n)) return n;
+  if (n >= 1000) return Math.round(n * 100) / 100;
+  if (n >= 1) return Math.round(n * 10000) / 10000;
+  return Math.round(n * 1e8) / 1e8;
+}
+
+/** Remove a manual entry and reverse its contribution to cost basis when priced. */
+function removeManualEntry(holding, entry) {
+  const lotCost =
+    entry.costUsd != null
+      ? entry.costUsd
+      : entry.unitPrice != null
+        ? manualLotCost(entry.amount, entry.unitPrice, entry.feePct)
+        : null;
+  if (lotCost != null && Number.isFinite(lotCost)) {
+    holding.costBasisUsd = Math.max(0, (Number(holding.costBasisUsd) || 0) - lotCost);
+  }
+  holding.manual = holding.manual.filter((m) => m.id !== entry.id);
+}
+
+function updateManualFeeHint() {
+  const hint = document.getElementById("manual-price-hint");
+  if (!hint) return;
+  const fee = getExchangeFeePct();
+  if (fee > 0) {
+    hint.textContent = `Cost basis uses amount × price × (1 + ${fee}% fee). Fee is saved and applied on add.`;
+  } else {
+    hint.textContent =
+      "Price defaults to market. Cost basis uses amount × price. Set a fee % to include exchange fees.";
+  }
+}
+
+/**
+ * Add manual lot. If unit price is provided, fold it into cost basis with exchange fee:
+ * cost = amount × price × (1 + fee%).
+ */
+function addManualToCurrent(amountRaw, priceRaw, feeRaw, labelRaw) {
   const pf = getPortfolio(nav.portfolioId);
   const coin = COIN_BY_ID[nav.coinId];
   if (!pf || !coin) return;
@@ -1692,17 +2279,51 @@ function addManualToCurrent(amountRaw, labelRaw) {
     return;
   }
 
+  // Persist fee setting from the form (even if price blank)
+  const feePct = setExchangeFeePct(feeRaw === "" || feeRaw == null ? getExchangeFeePct() : feeRaw);
+
+  let unitPrice = null;
+  const priceStr = String(priceRaw || "").trim();
+  if (priceStr) {
+    unitPrice = parseOptionalUsd(priceStr);
+    if (unitPrice == null || unitPrice <= 0) {
+      toast("Enter a valid price paid, or leave it blank", "error");
+      return;
+    }
+  }
+
+  const costUsd = unitPrice != null ? manualLotCost(amount, unitPrice, feePct) : null;
+
   const holding = getCoinHolding(pf, coin.id);
   holding.manual.push({
     id: uid(),
     amount,
     label: String(labelRaw || "").trim().slice(0, 40),
+    unitPrice,
+    feePct: unitPrice != null ? feePct : 0,
+    costUsd,
   });
+
+  if (costUsd != null) {
+    holding.costBasisUsd = (Number(holding.costBasisUsd) || 0) + costUsd;
+  }
+
   saveStore();
   document.getElementById("manual-amount-input").value = "";
   document.getElementById("manual-label-input").value = "";
+  // Re-fill price with live market on next render
+  manualPriceDirty = false;
+  document.getElementById("manual-price-input").value = "";
   render();
-  toast("Manual amount added", "success");
+
+  if (unitPrice != null) {
+    const cb = costBasisInfo(pf, coin.id);
+    const avgTxt = cb.avg != null ? formatUsd(cb.avg) : "—";
+    const feeNote = feePct > 0 ? ` · fee ${feePct}%` : "";
+    toast(`Added · cost ${formatUsd(costUsd)}${feeNote} · avg ${avgTxt}`, "success");
+  } else {
+    toast("Manual amount added", "success");
+  }
 }
 
 // ── Settings: export / import / wipe ───────────────────────────────────────
@@ -1727,6 +2348,7 @@ function importData(file) {
       store = {
         version: 2,
         activePortfolioId: data.activePortfolioId || data.portfolios[0]?.id || null,
+        exchangeFeePct: normalizeExchangeFeePct(data.exchangeFeePct),
         portfolios: data.portfolios.map(normalizePortfolio),
       };
       if (!store.portfolios.length) store = defaultStore();
@@ -1746,9 +2368,13 @@ function wipeAll() {
   if (!confirm("Delete all portfolios and local data?")) return;
   localStorage.removeItem(STORAGE_KEY);
   localStorage.removeItem(LEGACY_KEY);
+  localStorage.removeItem(SNAPSHOT_KEY);
   store = defaultStore();
   saveStore();
   balanceCache = {};
+  prices = {};
+  chartCache = {};
+  lastChartHoldings = [];
   showView("home");
   render();
   toast("Local data cleared");
@@ -1758,6 +2384,24 @@ function wipeAll() {
 
 function wire() {
   wirePullToRefresh();
+
+  document.getElementById("home-chart-tabs")?.addEventListener("click", (e) => {
+    const tab = e.target.closest(".chart-tab");
+    if (!tab || !tab.dataset.range) return;
+    if (tab.dataset.range === chartRange) return;
+    chartRange = tab.dataset.range;
+    syncChartTabs();
+    updateHomeChart(null, { force: false });
+  });
+
+  document.getElementById("home-chart-retry")?.addEventListener("click", () => {
+    // Bust cache for current range so retry actually refetches
+    const days = chartRange;
+    for (const key of Object.keys(chartCache)) {
+      if (key.endsWith(`:${days}`)) delete chartCache[key];
+    }
+    updateHomeChart(null, { force: true });
+  });
 
   document.getElementById("btn-back").addEventListener("click", () => {
     if (nav.view === "asset" || nav.view === "add-coin") {
@@ -1802,8 +2446,61 @@ function wire() {
     e.preventDefault();
     addManualToCurrent(
       document.getElementById("manual-amount-input").value,
+      document.getElementById("manual-price-input").value,
+      document.getElementById("manual-fee-input").value,
       document.getElementById("manual-label-input").value
     );
+  });
+
+  document.getElementById("manual-price-input").addEventListener("input", () => {
+    manualPriceDirty = true;
+  });
+
+  document.getElementById("manual-fee-input").addEventListener("change", () => {
+    const fee = setExchangeFeePct(document.getElementById("manual-fee-input").value || 0);
+    document.getElementById("manual-fee-input").value = fee > 0 ? String(fee) : "";
+    updateManualFeeHint();
+    toast(fee > 0 ? `Exchange fee saved: ${fee}%` : "Exchange fee cleared", "success");
+  });
+
+  document.getElementById("btn-save-avg-buy").addEventListener("click", () => {
+    const pf = getPortfolio(nav.portfolioId);
+    const coin = COIN_BY_ID[nav.coinId];
+    if (!pf || !coin) return;
+    if (setAvgBuyPrice(pf, coin.id, document.getElementById("avg-buy-input").value)) {
+      render();
+      const cb = costBasisInfo(pf, coin.id);
+      toast(`Avg buy set · cost basis ${formatUsd(cb.cost)}`, "success");
+    }
+  });
+
+  document.getElementById("btn-save-cost-basis").addEventListener("click", () => {
+    const pf = getPortfolio(nav.portfolioId);
+    const coin = COIN_BY_ID[nav.coinId];
+    if (!pf || !coin) return;
+    if (setCostBasisUsd(pf, coin.id, document.getElementById("cost-basis-input").value)) {
+      render();
+      const cb = costBasisInfo(pf, coin.id);
+      const avgTxt = cb.avg != null ? formatUsd(cb.avg) : "—";
+      toast(`Cost basis set · avg buy ${avgTxt}`, "success");
+    }
+  });
+
+  document.getElementById("btn-clear-cost").addEventListener("click", () => {
+    const pf = getPortfolio(nav.portfolioId);
+    const coin = COIN_BY_ID[nav.coinId];
+    if (!pf || !coin) return;
+    if (!confirm("Clear cost basis and average buy price for this coin?")) return;
+    clearCostBasis(pf, coin.id);
+    render();
+    toast("Cost basis cleared");
+  });
+
+  document.getElementById("btn-save-fee").addEventListener("click", () => {
+    const fee = setExchangeFeePct(document.getElementById("settings-fee-input").value || 0);
+    document.getElementById("settings-fee-input").value = fee > 0 ? String(fee) : "";
+    updateManualFeeHint();
+    toast(fee > 0 ? `Exchange fee saved: ${fee}%` : "Exchange fee cleared", "success");
   });
 
   document.getElementById("btn-export").addEventListener("click", exportData);
@@ -1827,6 +2524,7 @@ function wire() {
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 
+loadMarketSnapshot(); // restore last prices/balances so UI doesn't flash $0
 wire();
 render();
 refreshAll({ fromPull: false });

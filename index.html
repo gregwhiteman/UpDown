@@ -25,21 +25,43 @@
         <button type="button" class="icon-btn" id="btn-back" hidden aria-label="Back">‹</button>
       </div>
       <div class="topbar-title-wrap">
-        <h1 class="topbar-title" id="topbar-title">Dashboard</h1>
+        <div class="brand" id="topbar-brand">
+          <span class="brand-logo" aria-hidden="true">
+            <svg viewBox="0 0 32 32" width="22" height="22" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="32" height="32" rx="8" fill="#3861fb"/>
+              <path d="M16 7v18M16 7l-5 6M16 7l5 6M16 25l-5-6M16 25l5-6" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          <span class="brand-name">UpDown</span>
+        </div>
+        <h1 class="topbar-title" id="topbar-title" hidden>Dashboard</h1>
+      </div>
+      <div class="topbar-right">
         <button type="button" class="portfolio-switch" id="btn-portfolio-switch" hidden>
           <span id="active-portfolio-label">Portfolio</span>
           <span class="chevron" aria-hidden="true">▾</span>
         </button>
+        <div
+          class="global-spinner"
+          id="global-spinner"
+          hidden
+          role="status"
+          aria-live="polite"
+          aria-label="Loading data"
+        ></div>
       </div>
-      <div class="topbar-right" aria-hidden="true"></div>
     </header>
 
-    <!-- Views -->
-    <main class="views" id="views">
-      <div class="ptr-indicator" id="ptr-indicator" aria-hidden="true">
+    <!-- Pull-to-refresh (outside scroller so it never distorts scroll position) -->
+    <div class="ptr-indicator" id="ptr-indicator" aria-hidden="true">
+      <div class="ptr-indicator-inner">
         <span class="ptr-icon" id="ptr-icon">↓</span>
         <span class="ptr-label" id="ptr-label">Pull to refresh</span>
       </div>
+    </div>
+
+    <!-- Views -->
+    <main class="views" id="views">
       <!-- DASHBOARD: totalled holdings across included portfolios -->
       <section class="view view-active" id="view-home" data-view="home">
         <div class="summary-card">
@@ -50,8 +72,19 @@
             <span class="muted">24h</span>
           </div>
           <div class="chart-wrap" id="home-chart-wrap">
-            <svg class="chart-svg" id="home-chart" viewBox="0 0 320 96" preserveAspectRatio="none" role="img" aria-label="24 hour portfolio value chart"></svg>
-            <p class="chart-empty" id="home-chart-empty" hidden>Chart unavailable</p>
+            <svg class="chart-svg" id="home-chart" viewBox="0 0 320 96" preserveAspectRatio="none" role="img" aria-label="Portfolio value chart"></svg>
+            <div class="chart-overlay" id="home-chart-overlay" hidden>
+              <div class="chart-spinner" id="home-chart-spinner" hidden aria-hidden="true"></div>
+              <p class="chart-status" id="home-chart-status"></p>
+              <button type="button" class="btn-tiny chart-retry" id="home-chart-retry" hidden>Retry</button>
+            </div>
+          </div>
+          <div class="chart-tabs" id="home-chart-tabs" role="tablist" aria-label="Chart range">
+            <button type="button" class="chart-tab active" role="tab" data-range="1" aria-selected="true">24H</button>
+            <button type="button" class="chart-tab" role="tab" data-range="7" aria-selected="false">7D</button>
+            <button type="button" class="chart-tab" role="tab" data-range="30" aria-selected="false">30D</button>
+            <button type="button" class="chart-tab" role="tab" data-range="90" aria-selected="false">90D</button>
+            <button type="button" class="chart-tab" role="tab" data-range="max" aria-selected="false">ALL</button>
           </div>
           <p class="scope-hint" id="home-scope-hint" hidden></p>
           <div class="alloc-bar" id="home-alloc-bar" aria-hidden="true"></div>
@@ -138,8 +171,7 @@
         <div class="section-head">
           <h2>Manual amounts</h2>
         </div>
-        <p class="section-sub">Exchange balances, cold amounts, or anything you enter yourself.</p>
-        <div class="address-list" id="asset-manual-list"></div>
+        <p class="section-sub">Exchange balances, cold amounts, or anything you enter yourself. Include price paid to update average buy price.</p>
 
         <form class="add-form card-form" id="add-manual-form" autocomplete="off">
           <label class="field-label" for="manual-amount-input">Amount</label>
@@ -150,6 +182,23 @@
             inputmode="decimal"
             placeholder="e.g. 0.5"
           />
+          <label class="field-label" for="manual-price-input">Price paid (USD / coin)</label>
+          <input
+            id="manual-price-input"
+            class="field-input"
+            type="text"
+            inputmode="decimal"
+            placeholder="Market price"
+          />
+          <label class="field-label" for="manual-fee-input">Exchange fee % (saved)</label>
+          <input
+            id="manual-fee-input"
+            class="field-input"
+            type="text"
+            inputmode="decimal"
+            placeholder="e.g. 0.1"
+          />
+          <p class="field-hint" id="manual-price-hint">Price defaults to market. Cost basis uses amount × price. Set a fee % to include exchange fees.</p>
           <label class="field-label" for="manual-label-input">Label (optional)</label>
           <input
             id="manual-label-input"
@@ -160,6 +209,61 @@
           />
           <button type="submit" class="btn-primary full">Add manual amount</button>
         </form>
+
+        <div class="address-list" id="asset-manual-list"></div>
+
+        <!-- Cost basis / avg buy -->
+        <div class="section-head spaced">
+          <h2>Cost basis</h2>
+        </div>
+        <p class="section-sub">
+          Set average buy price or total cost for this coin in this portfolio. Manual buys with a price paid update the average automatically.
+        </p>
+        <div class="summary-card compact cost-card">
+          <div class="cost-stats" id="asset-cost-stats">
+            <div>
+              <div class="stat-label">Avg. buy</div>
+              <div class="stat-value" id="asset-avg-buy">—</div>
+            </div>
+            <div>
+              <div class="stat-label">Cost basis</div>
+              <div class="stat-value" id="asset-cost-basis">—</div>
+            </div>
+            <div>
+              <div class="stat-label">P/L</div>
+              <div class="stat-value" id="asset-pl">—</div>
+            </div>
+          </div>
+          <form class="cost-form" id="cost-basis-form" autocomplete="off">
+            <div class="cost-form-row">
+              <div class="cost-field">
+                <label class="field-label" for="avg-buy-input">Avg. buy price (USD)</label>
+                <input
+                  id="avg-buy-input"
+                  class="field-input"
+                  type="text"
+                  inputmode="decimal"
+                  placeholder="e.g. 42000"
+                />
+              </div>
+              <div class="cost-field">
+                <label class="field-label" for="cost-basis-input">Cost basis (USD)</label>
+                <input
+                  id="cost-basis-input"
+                  class="field-input"
+                  type="text"
+                  inputmode="decimal"
+                  placeholder="e.g. 21000"
+                />
+              </div>
+            </div>
+            <div class="cost-form-actions">
+              <button type="button" class="btn-secondary" id="btn-save-avg-buy">Set avg buy</button>
+              <button type="button" class="btn-secondary" id="btn-save-cost-basis">Set cost basis</button>
+              <button type="button" class="btn-danger-ghost" id="btn-clear-cost">Clear</button>
+            </div>
+          </form>
+        </div>
 
         <!-- Wallet addresses -->
         <div class="section-head spaced">
@@ -203,6 +307,20 @@
         <p class="empty-hint" id="settings-pf-empty" hidden>
           Create a portfolio, then add wallet addresses or manual amounts.
         </p>
+
+        <div class="settings-group">
+          <h2>Trading</h2>
+          <p class="page-desc">Applied to manual buys when calculating cost basis: cost = amount × price × (1 + fee%).</p>
+          <label class="field-label" for="settings-fee-input">Exchange fee %</label>
+          <input
+            id="settings-fee-input"
+            class="field-input"
+            type="text"
+            inputmode="decimal"
+            placeholder="e.g. 0.1"
+          />
+          <button type="button" class="btn-secondary full" id="btn-save-fee">Save fee</button>
+        </div>
 
         <div class="settings-group">
           <h2>Data</h2>

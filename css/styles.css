@@ -96,8 +96,9 @@ button {
   height: calc(var(--topbar-h) + var(--safe-top));
   padding: var(--safe-top) 8px 0;
   display: grid;
-  grid-template-columns: 44px 1fr 44px;
+  grid-template-columns: 44px 1fr minmax(44px, auto);
   align-items: center;
+  column-gap: 4px;
   background: rgba(13, 20, 33, 0.92);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -128,6 +129,41 @@ button {
 .topbar-title-wrap {
   text-align: center;
   min-width: 0;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 44px;
+  max-width: 48vw;
+  padding-right: 4px;
+}
+
+.topbar-right:not(.has-switch) {
+  /* Keep layout balanced when no portfolio switch */
+  min-width: 44px;
+}
+
+/* Global data-loading spinner (far right of top bar) */
+.global-spinner {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.12);
+  border-top-color: var(--accent);
+  animation: chart-spin 0.7s linear infinite;
+}
+
+.global-spinner[hidden] {
+  display: none !important;
 }
 
 .topbar-title {
@@ -137,20 +173,74 @@ button {
   letter-spacing: -0.02em;
 }
 
+/* Home brand mark */
+.brand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.brand[hidden] {
+  display: none !important;
+}
+
+.brand-logo {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  line-height: 0;
+}
+
+.brand-logo svg {
+  display: block;
+  border-radius: 7px;
+  box-shadow: 0 2px 8px rgba(56, 97, 251, 0.35);
+}
+
+.brand-name {
+  font-size: 1.12rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: var(--text);
+}
+
 .portfolio-switch {
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 4px;
-  margin: 2px auto 0;
+  margin: 0;
   max-width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 8px;
   color: var(--text-secondary);
-  font-size: 0.78rem;
-  font-weight: 500;
+  font-size: 0.82rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.portfolio-switch[hidden] {
+  display: none !important;
+}
+
+.portfolio-switch:active {
+  background: var(--bg-row-hover);
+  color: var(--text);
+}
+
+.portfolio-switch #active-portfolio-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 28vw;
 }
 
 .portfolio-switch .chevron {
   font-size: 0.7rem;
   opacity: 0.7;
+  flex-shrink: 0;
 }
 
 .icon-btn {
@@ -177,37 +267,46 @@ button {
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
   padding-bottom: calc(var(--safe-bottom) + 24px);
-  overscroll-behavior-y: contain;
+  /* Pull offset via padding (not transform) so iOS never gets stuck mid-scroll */
+  padding-top: var(--ptr-offset, 0px);
+  overscroll-behavior-y: none;
   touch-action: pan-y;
-  will-change: transform;
 }
 
-.views.ptr-snapping {
-  transition: transform 0.2s ease;
+.views.ptr-animating {
+  transition: padding-top 0.22s ease;
 }
 
-/* Pull-to-refresh */
+/* Pull-to-refresh indicator: pinned under the topbar, height follows --ptr-offset */
 .ptr-indicator {
   position: absolute;
   left: 0;
   right: 0;
-  top: 0;
-  height: 56px;
+  top: calc(var(--topbar-h) + var(--safe-top));
+  height: var(--ptr-offset, 0px);
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 15;
+  margin: 0;
+}
+
+.ptr-indicator-inner {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  pointer-events: none;
-  transform: translateY(-100%);
+  height: 48px;
   opacity: 0;
-  transition: opacity 0.15s ease;
-  z-index: 5;
+  transition: opacity 0.12s ease;
   color: var(--text-secondary);
   font-size: 0.82rem;
   font-weight: 600;
 }
 
-.ptr-indicator.visible {
+.ptr-indicator.visible .ptr-indicator-inner {
   opacity: 1;
 }
 
@@ -293,14 +392,22 @@ button {
   flex-wrap: wrap;
 }
 
-/* 24h portfolio chart */
+/* Portfolio chart */
 .chart-wrap {
   position: relative;
   margin-top: 14px;
-  height: 96px;
+  height: 110px;
   border-radius: 10px;
   overflow: hidden;
   background: rgba(0, 0, 0, 0.18);
+}
+
+.chart-wrap.is-loading .chart-svg {
+  opacity: 0.35;
+}
+
+.chart-wrap.has-error .chart-svg {
+  opacity: 0;
 }
 
 .chart-svg {
@@ -309,20 +416,113 @@ button {
   height: 100%;
 }
 
-.chart-empty {
+.chart-overlay {
   position: absolute;
   inset: 0;
   margin: 0;
-  display: grid;
-  place-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px;
+  text-align: center;
+  pointer-events: none;
+  background: rgba(13, 20, 33, 0.45);
+}
+
+.chart-overlay.is-loading {
+  background: rgba(13, 20, 33, 0.28);
+}
+
+.chart-overlay.is-error {
+  background: rgba(13, 20, 33, 0.62);
+  pointer-events: auto;
+}
+
+.chart-overlay.is-partial {
+  justify-content: flex-end;
+  padding-bottom: 8px;
+  background: linear-gradient(transparent, rgba(13, 20, 33, 0.55));
+}
+
+.chart-overlay[hidden] {
+  display: none !important;
+}
+
+.chart-status {
+  margin: 0;
   font-size: 0.78rem;
   color: var(--text-muted);
   font-weight: 500;
-  pointer-events: none;
+  max-width: 90%;
 }
 
-.chart-empty[hidden] {
-  display: none;
+.chart-overlay.is-error .chart-status {
+  color: var(--text-secondary);
+}
+
+.chart-retry {
+  pointer-events: auto;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: rgba(56, 97, 251, 0.2);
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 0.78rem;
+}
+
+.chart-retry:active {
+  background: rgba(56, 97, 251, 0.35);
+}
+
+.chart-spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2.5px solid rgba(255, 255, 255, 0.12);
+  border-top-color: var(--accent);
+  animation: chart-spin 0.75s linear infinite;
+}
+
+.chart-spinner[hidden] {
+  display: none !important;
+}
+
+@keyframes chart-spin {
+  to { transform: rotate(360deg); }
+}
+
+.chart-tabs {
+  display: flex;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.chart-tab {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 4px;
+  border-radius: 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  background: transparent;
+  transition: background 0.15s, color 0.15s;
+}
+
+.chart-tab:active {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.chart-tab.active {
+  color: var(--text);
+  background: rgba(56, 97, 251, 0.28);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .pill {
@@ -397,6 +597,58 @@ button {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
+
+.stat-value.up { color: var(--up); }
+.stat-value.down { color: var(--down); }
+
+.cost-card {
+  margin-bottom: 8px;
+}
+
+.cost-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.cost-form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.cost-field {
+  min-width: 0;
+}
+
+.cost-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.cost-form-actions .btn-secondary,
+.cost-form-actions .btn-danger-ghost {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.8rem;
+  padding: 10px 8px;
+}
+
+.holding-pl {
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.holding-pl.up { color: var(--up); }
+.holding-pl.down { color: var(--down); }
+.holding-pl.neutral { color: var(--text-muted); }
 
 /* ── Section headers ── */
 .section-head {
@@ -668,12 +920,37 @@ button.holding-row:active {
   letter-spacing: -0.02em;
   flex-shrink: 0;
   color: #fff;
+  overflow: hidden;
 }
 
 .coin-avatar.lg {
   width: 48px;
   height: 48px;
   font-size: 0.75rem;
+}
+
+/* Coin logos from /logo */
+.coin-avatar.has-logo {
+  background: #fff !important;
+  padding: 6px;
+  box-sizing: border-box;
+}
+
+.coin-avatar.has-logo .coin-logo {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  pointer-events: none;
+}
+
+/* Full circular brand marks (btc, hbar, ltc, doge) fill the avatar */
+.coin-avatar.has-logo.logo-fill {
+  padding: 0;
+}
+
+.coin-avatar.has-logo.logo-fill .coin-logo {
+  object-fit: cover;
 }
 
 .holding-name {
